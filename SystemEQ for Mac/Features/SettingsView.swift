@@ -61,7 +61,8 @@ struct SettingsView: View {
             Button(localization.localized(.cancel), role: .cancel) {}
             Button(localization.localized(.factoryReset), role: .destructive) {
                 FactoryReset.isRequested = true
-                NSApp.terminate(nil)
+                // Let SwiftUI dismiss the confirmation before termination can show an error.
+                DispatchQueue.main.async { NSApp.terminate(nil) }
             }
         } message: {
             Text(localization.localized(.factoryResetConfirmation))

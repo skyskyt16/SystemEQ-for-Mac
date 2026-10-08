@@ -179,7 +179,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if FactoryReset.isRequested {
             do {
                 // Login registration lives outside UserDefaults.
-                if SMAppService.mainApp.status != .notRegistered {
+                let loginStatus = SMAppService.mainApp.status
+                if loginStatus == .enabled || loginStatus == .requiresApproval {
                     try SMAppService.mainApp.unregister()
                 }
                 guard let domainName = Bundle.main.bundleIdentifier else {
