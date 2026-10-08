@@ -247,6 +247,7 @@ struct EQBandHandle: View {
                         }
                         .onEnded { _ in isDragging = false }
                 )
+                .simultaneousGesture(TapGesture(count: 2).onEnded { gain = 0 })
         }
         .frame(width: size.width, height: size.height)
     }

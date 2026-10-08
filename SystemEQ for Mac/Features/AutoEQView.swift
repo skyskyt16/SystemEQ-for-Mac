@@ -1124,7 +1124,8 @@ struct AutoEQView: View {
                 let bassBoost = bassBoostForFrequency(mapped[id].center)
                 let rawGain = Double(newValue) - bassBoost
                 let clamped = min(max(rawGain, -12), 12)
-                let stepped = (clamped / 0.5).rounded() * 0.5
+                // A zero request must cancel Bass Boost exactly, without half-dB rounding.
+                let stepped = newValue == 0 ? -bassBoost : (clamped / 0.5).rounded() * 0.5
                 if mapped[id].gain != stepped {
                     mapped[id].gain = stepped
                     scheduleLiveApply()
