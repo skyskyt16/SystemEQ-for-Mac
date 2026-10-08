@@ -9,6 +9,7 @@
 //  Storage roundtrip for the per-output preset map (issue #31)
 //
 
+import Combine
 @testable import SystemEQ_for_Mac
 import XCTest
 
@@ -196,5 +197,56 @@ final class DevicePresetManagerTests: XCTestCase {
 
         XCTAssertEqual(engine.bands.map(\.gain), [Float](repeating: 0, count: 10))
         XCTAssertEqual(engine.preampGain, 0)
+    }
+    func testOutputChangesPublishAfterEngineAndPersistenceIncludingSameDescriptor() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: Self.suiteName))
+        defaults.set(true, forKey: DevicePresetManager.autoSwitchKey)
+        let manager = DevicePresetManager.shared
+        let first = makeRecord(name: "same")
+        let second = DevicePresetRecord(
+            mode: EQBandMode.tenBand.rawValue,
+            appliedGains: Array(repeating: -2, count: 10),
+            cleanGains: Array(repeating: -3, count: 10),
+            preamp: -7, bassBoost: 4, descriptorJSON: first.descriptorJSON
+        )
+        manager.recordApply(first, outputUID: "first")
+        manager.recordApply(second, outputUID: "second")
+        let engine = AudioEngine(defaults: defaults, enableRouting: { _ in true }, disableRouting: { _ in })
+        var received: [DevicePresetRecord?] = []
+        let subscription = manager.outputPresetChanges.sink { record in
+            received.append(record)
+            XCTAssertEqual(
+                engine.bands.map(\.gain),
+                record?.appliedGains ?? Array(repeating: 0, count: engine.bands.count)
+            )
+            XCTAssertEqual(engine.preampGain, record?.preamp ?? 0)
+            XCTAssertEqual(PresetPersistence.load()?.bassBoost, record?.bassBoost ?? 0)
+            XCTAssertEqual(defaults.string(forKey: "lastAppliedPresetJSON"), record?.descriptorJSON)
+        }
+        defer { subscription.cancel() }
+
+        manager.outputChanged(to: "first", engine: engine)
+        manager.outputChanged(to: "second", engine: engine)
+        manager.outputChanged(to: "unmapped", engine: engine)
+        manager.outputChanged(to: "first", engine: engine)
+
+        XCTAssertEqual(received.count, 4)
+        XCTAssertEqual(received[0], first)
+        XCTAssertEqual(received[1], second)
+        XCTAssertNil(received[2])
+        XCTAssertEqual(received[3], first)
+    }
+
+    func testDisabledAutoSwitchDoesNotPublishAUIReplacement() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: Self.suiteName))
+        let manager = DevicePresetManager.shared
+        let engine = AudioEngine(defaults: defaults, enableRouting: { _ in true }, disableRouting: { _ in })
+        var received = false
+        let subscription = manager.outputPresetChanges.sink { _ in received = true }
+        defer { subscription.cancel() }
+
+        manager.outputChanged(to: "unmapped", engine: engine)
+
+        XCTAssertFalse(received)
     }
 }

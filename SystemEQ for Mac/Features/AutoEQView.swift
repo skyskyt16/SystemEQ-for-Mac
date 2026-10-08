@@ -98,6 +98,7 @@ struct AutoEQView: View {
     // MARK: - Audio Engine (ObservableObject для реактивності)
 
     @StateObject private var audioEngine = AudioEngine.shared
+    @ObservedObject private var audioRouter = AudioRouter.shared
     @State private var isTogglingEQ = false
 
     // MARK: - Active Preset Tracking
@@ -111,6 +112,7 @@ struct AutoEQView: View {
     // застосував би пресет повторно поверх уже відновленого рушія — гасимо один раз.
     @State private var suppressNextAutoApply = false
     @State private var presetGeneration: UInt64 = 0
+    @State private var restoredDevicePreset: DevicePresetRecord?
 
     @State private var bassBoost: Double = 0
     @State private var rawText: String = ""
@@ -253,6 +255,11 @@ struct AutoEQView: View {
             windowSize: .large
         ) {
             VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                if let output = audioRouter.selectedOutputDevice {
+                    Text("\(localization.localized(.outputDevice)): \(output.name)")
+                        .font(AppTypography.bodySmall)
+                        .foregroundStyle(.secondary)
+                }
                 activePresetSection
                 presetLibrarySection
 
@@ -288,7 +295,7 @@ struct AutoEQView: View {
                         guard !self.parsed.isEmpty, !self.mapped.isEmpty else { return }
                         let suppressed = suppressNextAutoApply
                         suppressNextAutoApply = false
-                        if !suppressed, audioEngine.isEnabled {
+                        if !suppressed, restoredDevicePreset == nil, audioEngine.isEnabled {
                             applyToAudioEngine()
                         }
                     }
@@ -297,6 +304,9 @@ struct AutoEQView: View {
         }
         .onReceive(audioEngine.$bandMode) { restoredMode in
             syncBandModeFromAudioEngine(restoredMode)
+        }
+        .onReceive(DevicePresetManager.shared.outputPresetChanges) { record in
+            restoreDevicePresetUI(record)
         }
         .onAppear {
             // Defer state changes to next run loop to avoid "Publishing changes from within view updates"
@@ -331,7 +341,16 @@ struct AutoEQView: View {
                     Task { await buildOrUpdateIndex() }
                 }
 
+                if let saved = PresetPersistence.load() {
+                    restoredDevicePreset = DevicePresetRecord(
+                        mode: saved.mode.rawValue,
+                        appliedGains: audioEngine.bands.map(\.gain),
+                        cleanGains: saved.gains, preamp: saved.preamp,
+                        bassBoost: saved.bassBoost, descriptorJSON: lastAppliedPresetJSON
+                    )
+                }
                 restoreLastAppliedPresetUI()
+                if let record = restoredDevicePreset { preampDB = Double(record.preamp) }
             }
         }
     }
@@ -846,7 +865,9 @@ struct AutoEQView: View {
     }
 
     private func refreshDisplayedBands(shouldApply: Bool) {
+        let generation = presetGeneration
         DispatchQueue.main.async {
+            guard generation == presetGeneration else { return }
             if bandMode == .ten, !parsed10.isEmpty {
                 parsed = parsed10
                 preampDB = preampDB10
@@ -855,6 +876,9 @@ struct AutoEQView: View {
                 preampDB = preampDB31
             }
             mapped = mappedBands()
+            if let record = restoredDevicePreset, record.mode == bandMode.audioEngineMode.rawValue {
+                preampDB = Double(record.preamp)
+            }
             guard shouldApply else { return }
             applyEQDebounceTask?.cancel()
             applyEQDebounceTask = Task {
@@ -1411,7 +1435,12 @@ struct AutoEQView: View {
     }
 
     @MainActor
-    private func importCandidate(_ c: SearchCandidate) async {
+    private func importCandidate(_ c: SearchCandidate, restoringUI: Bool = false) async {
+        if !restoringUI {
+            restoredDevicePreset = nil
+            suppressNextAutoApply = false
+            presetGeneration &+= 1
+        }
         let generation = presetGeneration
         isSearching = true
         defer { isSearching = false }
@@ -1446,11 +1475,12 @@ struct AutoEQView: View {
         self.activePresetPath = nil
 
         // Request deduplication
-        if activeRequests.contains(c.path) {
+        let requestKey = "\(generation):\(c.path)"
+        if activeRequests.contains(requestKey) {
             return
         }
-        activeRequests.insert(c.path)
-        defer { activeRequests.remove(c.path) }
+        activeRequests.insert(requestKey)
+        defer { activeRequests.remove(requestKey) }
 
         if c.path.hasPrefix(Self.databaseCandidatePrefix) {
             guard let headphoneID = databaseHeadphoneID(from: c) else {
@@ -1681,6 +1711,11 @@ struct AutoEQView: View {
     /// відновленні при старті та завантаженні з обраних.
     @discardableResult
     private func applyCustomPreset(text: String, name: String, persist: Bool, autoApply: Bool) -> Bool {
+        if autoApply {
+            restoredDevicePreset = nil
+            suppressNextAutoApply = false
+            presetGeneration &+= 1
+        }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         var bands: [ParsedBand] = []
         var preamp: Double?
@@ -1888,6 +1923,10 @@ struct AutoEQView: View {
 
     private func mappedBands() -> [MappedBand] {
         let centers = (bandMode == .ten) ? tenCenters : thirtyOneCenters
+        if let record = restoredDevicePreset,
+           record.mode == bandMode.audioEngineMode.rawValue, record.cleanGains.count == centers.count {
+            return zip(centers, record.cleanGains).map { MappedBand(center: $0, gain: Double($1)) }
+        }
         if activePresetPath?.hasPrefix(Self.databaseCandidatePrefix) == true {
             let direct = bandMode == .ten ? parsed10 : parsed31
             if direct.count == centers.count {
@@ -2036,7 +2075,8 @@ struct AutoEQView: View {
 
     // MARK: - Reset
 
-    private func removeActivePreset() {
+    private func clearPresetUI() {
+        restoredDevicePreset = nil
         presetGeneration &+= 1
         applyEQDebounceTask?.cancel()
         applyEQDebounceTask = nil
@@ -2056,12 +2096,28 @@ struct AutoEQView: View {
         activePresetPath = nil
         draggingBandIndex = nil
         hoveredBandIndex = nil
+    }
+
+    private func removeActivePreset() {
+        clearPresetUI()
         lastAppliedPresetJSON = ""
         lastCustomPresetText = ""
         lastCustomPresetName = ""
         PresetPersistence.clear()
         DevicePresetManager.shared.removePreset()
         audioEngine.resetAllBands()
+    }
+
+    /// A device switch restores the saved values, not the original preset defaults.
+    private func restoreDevicePresetUI(_ record: DevicePresetRecord?) {
+        clearPresetUI()
+        bandMode = BandMode(audioEngineMode: audioEngine.bandMode)
+        guard let record else { return }
+        restoredDevicePreset = record
+        bassBoost = Double(record.bassBoost)
+        restoreLastAppliedPresetUI(descriptorJSON: record.descriptorJSON)
+        preampDB = Double(record.preamp)
+        mapped = mappedBands()
     }
 
     // MARK: - Last Applied Preset (UI restore)
@@ -2101,10 +2157,11 @@ struct AutoEQView: View {
 
     /// Відновлює у вікні останній застосований пресет — лише UI: рушій свій стан
     /// уже відновив через PresetPersistence, тому вотчер parsed гаситься на один цикл.
-    private func restoreLastAppliedPresetUI() {
+    private func restoreLastAppliedPresetUI(descriptorJSON: String? = nil) {
         guard parsed.isEmpty else { return }
 
-        if let data = lastAppliedPresetJSON.data(using: .utf8),
+        let json = descriptorJSON ?? lastAppliedPresetJSON
+        if let data = json.data(using: .utf8),
            let descriptor = try? JSONDecoder().decode(LastAppliedDescriptor.self, from: data) {
             if let text = descriptor.rawText, !text.isEmpty {
                 suppressNextAutoApply = true
@@ -2120,13 +2177,21 @@ struct AutoEQView: View {
                     display: descriptor.name ?? path,
                     isParametric: isParametric
                 )
+                let generation = presetGeneration
                 Task {
-                    await importCandidate(candidate)
+                    guard generation == presetGeneration else { return }
+                    await importCandidate(candidate, restoringUI: true)
+                    guard generation == presetGeneration else { return }
+                    if let record = restoredDevicePreset, record.mode == bandMode.audioEngineMode.rawValue {
+                        preampDB = Double(record.preamp)
+                        mapped = mappedBands()
+                    }
                     // Невдалий імпорт не ставить parsed — повертаємо вотчер до звичайної роботи
                     if parsed.isEmpty { suppressNextAutoApply = false }
                 }
             }
-        } else if !lastCustomPresetText.isEmpty {
+        } else if !lastCustomPresetText.isEmpty,
+                  !UserDefaults.standard.bool(forKey: DevicePresetManager.autoSwitchKey) {
             // Легасі-міграція: до появи дескриптора зберігався лише custom-імпорт
             suppressNextAutoApply = true
             if !applyCustomPreset(

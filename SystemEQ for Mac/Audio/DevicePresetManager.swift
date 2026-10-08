@@ -32,14 +32,19 @@ final class DevicePresetManager {
 
     private var cancellable: AnyCancellable?
 
+    // Emit after engine and persistence agree, including switches to an unmapped output.
+    let outputPresetChanges = PassthroughSubject<DevicePresetRecord?, Never>()
+
     private init() {}
 
     /// Стежити за зміною пристрою виводу. Викликається один раз з AppStartup.
     func bind() {
+        // Restore the current output at startup too; Start Clean explicitly skips it.
+        let skipInitialOutput = Self.defaults.string(forKey: "eqStartupMode") == EQStartupMode.startClean.rawValue
         cancellable = AudioRouter.shared.$selectedOutputDevice
             .compactMap(\.?.uid)
             .removeDuplicates()
-            .dropFirst()
+            .dropFirst(skipInitialOutput ? 1 : 0)
             .receive(on: RunLoop.main)
             .sink { [weak self] uid in
                 self?.outputChanged(to: uid)
@@ -104,6 +109,7 @@ final class DevicePresetManager {
             bassBoost: record.bassBoost
         )
         Self.defaults.set(record.descriptorJSON, forKey: "lastAppliedPresetJSON")
+        outputPresetChanges.send(record)
 
         dlog("Device preset applied for output \(uid)", level: .info, category: .preset)
     }
@@ -115,6 +121,7 @@ final class DevicePresetManager {
         engine.setPreampGain(0)
         PresetPersistence.save(mode: mode, gains: gains, preamp: 0, bassBoost: 0)
         Self.defaults.removeObject(forKey: "lastAppliedPresetJSON")
+        outputPresetChanges.send(nil)
         dlog("Flat EQ applied for unmapped output \(outputUID)", level: .info, category: .preset)
     }
 
