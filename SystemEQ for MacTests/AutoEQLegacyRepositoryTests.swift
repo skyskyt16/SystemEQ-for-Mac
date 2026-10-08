@@ -1,6 +1,11 @@
+// Async XCTest entry points avoid the isolated-deinit runtime crash.
+// https://github.com/swiftlang/swift/issues/87316
+// swiftformat:disable redundantAsync
+
 @testable import SystemEQ_for_Mac
 import XCTest
 
+@MainActor
 final class AutoEQLegacyRepositoryTests: XCTestCase {
     private var temporaryDirectory: URL!
 
@@ -15,7 +20,7 @@ final class AutoEQLegacyRepositoryTests: XCTestCase {
         temporaryDirectory = nil
     }
 
-    func testOfflineIndexRoundTripReportsAge() throws {
+    func testOfflineIndexRoundTripReportsAge() async throws {
         let repository = AutoEQLegacyRepository(applicationSupportDirectory: temporaryDirectory)
         let entries = [
             OfflineIndexEntry(
@@ -38,7 +43,7 @@ final class AutoEQLegacyRepositoryTests: XCTestCase {
         XCTAssertTrue(stale.needsUpdate)
     }
 
-    func testDiskCacheDoesNotCreateNetworkSessionAndFirstAccessReusesIt() {
+    func testDiskCacheDoesNotCreateNetworkSessionAndFirstAccessReusesIt() async {
         var sessionCreationCount = 0
         let expectedSession = URLSession(configuration: .ephemeral)
         defer { expectedSession.invalidateAndCancel() }
@@ -60,7 +65,7 @@ final class AutoEQLegacyRepositoryTests: XCTestCase {
         XCTAssertEqual(sessionCreationCount, 1)
     }
 
-    func testInjectedNetworkSessionDoesNotCallFactory() {
+    func testInjectedNetworkSessionDoesNotCallFactory() async {
         let expectedSession = URLSession(configuration: .ephemeral)
         defer { expectedSession.invalidateAndCancel() }
         let repository = AutoEQLegacyRepository(
@@ -75,7 +80,7 @@ final class AutoEQLegacyRepositoryTests: XCTestCase {
         XCTAssertTrue(repository.session === expectedSession)
     }
 
-    func testCandidateCacheRoundTripAndExpiration() throws {
+    func testCandidateCacheRoundTripAndExpiration() async throws {
         let repository = AutoEQLegacyRepository(applicationSupportDirectory: temporaryDirectory)
         let candidate = SearchCandidate(
             path: "results/oratory1990/over-ear/Sennheiser HD 600/README.md",

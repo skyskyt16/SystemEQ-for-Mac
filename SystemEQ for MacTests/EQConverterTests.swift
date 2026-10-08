@@ -1,3 +1,7 @@
+// Async XCTest entry points avoid the isolated-deinit runtime crash.
+// https://github.com/swiftlang/swift/issues/87316
+// swiftformat:disable redundantAsync
+
 //
 //  EQConverterTests.swift
 //  SystemEQ for MacTests
@@ -8,12 +12,13 @@
 @testable import SystemEQ_for_Mac
 import XCTest
 
+@MainActor
 final class EQConverterTests: XCTestCase {
     let converter = EQConverter.shared
 
     // MARK: - 10-Band Fixed EQ Conversion
 
-    func testConvertToFixedBand_emptyBands_returnsAllZeros() {
+    func testConvertToFixedBand_emptyBands_returnsAllZeros() async {
         let result = converter.convertToFixedBand([], preampGain: 0)
 
         XCTAssertEqual(result.count, 10, "Should return 10 bands")
@@ -27,7 +32,7 @@ final class EQConverterTests: XCTestCase {
         }
     }
 
-    func testConvertToFixedBand_withPreamp_addsOffset() {
+    func testConvertToFixedBand_withPreamp_addsOffset() async {
         let preamp: Float = 3.0
         let result = converter.convertToFixedBand([], preampGain: preamp)
 
@@ -42,7 +47,7 @@ final class EQConverterTests: XCTestCase {
         }
     }
 
-    func testConvertToFixedBand_singlePeakBand_maxAtCenter() {
+    func testConvertToFixedBand_singlePeakBand_maxAtCenter() async {
         // Create a peak filter at 1000 Hz with +6 dB gain
         let band = ParametricBand(frequency: 1000, gain: 6.0, q: 1.0, filterType: .peak)
         let result = converter.convertToFixedBand([band], preampGain: 0)
@@ -69,7 +74,7 @@ final class EQConverterTests: XCTestCase {
         )
     }
 
-    func testConvertToFixedBand_lowShelfBand() {
+    func testConvertToFixedBand_lowShelfBand() async {
         let band = ParametricBand(frequency: 100, gain: 6.0, q: 0.7, filterType: .lowShelf)
         let result = converter.convertToFixedBand([band], preampGain: 0)
 
@@ -94,7 +99,7 @@ final class EQConverterTests: XCTestCase {
         )
     }
 
-    func testConvertToFixedBand_highShelfBand() {
+    func testConvertToFixedBand_highShelfBand() async {
         let band = ParametricBand(frequency: 8000, gain: -6.0, q: 0.7, filterType: .highShelf)
         let result = converter.convertToFixedBand([band], preampGain: 0)
 
@@ -116,7 +121,7 @@ final class EQConverterTests: XCTestCase {
 
     // MARK: - 31-Band Graphic EQ Conversion
 
-    func testConvertToGraphicEQ_emptyBands_returnsAllZeros() {
+    func testConvertToGraphicEQ_emptyBands_returnsAllZeros() async {
         let result = converter.convertToGraphicEQ([], preampGain: 0)
 
         XCTAssertEqual(result.count, 31, "Should return 31 bands")
@@ -125,14 +130,14 @@ final class EQConverterTests: XCTestCase {
         }
     }
 
-    func testConvertToGraphicEQ_singleBand_has31Values() {
+    func testConvertToGraphicEQ_singleBand_has31Values() async {
         let band = ParametricBand(frequency: 1000, gain: 6.0, q: 1.0, filterType: .peak)
         let result = converter.convertToGraphicEQ([band], preampGain: 0)
 
         XCTAssertEqual(result.count, 31, "Should always return 31 values")
     }
 
-    func testConvertToGraphicEQ_withPreamp() {
+    func testConvertToGraphicEQ_withPreamp() async {
         let preamp: Float = -2.5
         let result = converter.convertToGraphicEQ([], preampGain: preamp)
 
@@ -148,7 +153,7 @@ final class EQConverterTests: XCTestCase {
 
     // MARK: - Multiple Bands
 
-    func testConvertToFixedBand_multipleBands_accumulates() {
+    func testConvertToFixedBand_multipleBands_accumulates() async {
         // Two peaks at the same frequency should accumulate
         let band1 = ParametricBand(frequency: 1000, gain: 3.0, q: 1.0, filterType: .peak)
         let band2 = ParametricBand(frequency: 1000, gain: 3.0, q: 1.0, filterType: .peak)
@@ -168,7 +173,7 @@ final class EQConverterTests: XCTestCase {
 
     // MARK: - Edge Cases
 
-    func testConvertToFixedBand_extremeGain() {
+    func testConvertToFixedBand_extremeGain() async {
         let band = ParametricBand(frequency: 1000, gain: 30.0, q: 1.0, filterType: .peak)
         let result = converter.convertToFixedBand([band], preampGain: 0)
 
@@ -179,7 +184,7 @@ final class EQConverterTests: XCTestCase {
         }
     }
 
-    func testConvertToFixedBand_extremeQ() {
+    func testConvertToFixedBand_extremeQ() async {
         let band = ParametricBand(frequency: 1000, gain: 6.0, q: 0.01, filterType: .peak)
         let result = converter.convertToFixedBand([band], preampGain: 0)
 
@@ -189,7 +194,7 @@ final class EQConverterTests: XCTestCase {
         }
     }
 
-    func testConvertToFixedBand_veryHighQ_narrowPeak() {
+    func testConvertToFixedBand_veryHighQ_narrowPeak() async {
         let band = ParametricBand(frequency: 1000, gain: 6.0, q: 10.0, filterType: .peak)
         let result = converter.convertToFixedBand([band], preampGain: 0)
 

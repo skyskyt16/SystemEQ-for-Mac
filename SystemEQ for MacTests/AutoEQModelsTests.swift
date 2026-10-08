@@ -1,3 +1,7 @@
+// Async XCTest entry points avoid the isolated-deinit runtime crash.
+// https://github.com/swiftlang/swift/issues/87316
+// swiftformat:disable redundantAsync
+
 //
 //  AutoEQModelsTests.swift
 //  SystemEQ for MacTests
@@ -12,7 +16,7 @@ import XCTest
 final class AutoEQModelsTests: XCTestCase {
     // MARK: - ParametricBand Tests
 
-    func testParametricBand_codableRoundtrip() throws {
+    func testParametricBand_codableRoundtrip() async throws {
         let original = ParametricBand(
             frequency: 1000.0,
             gain: 6.0,
@@ -29,7 +33,7 @@ final class AutoEQModelsTests: XCTestCase {
         XCTAssertEqual(decoded.filterType, original.filterType)
     }
 
-    func testParametricBand_defaultFilterType_isPeak() throws {
+    func testParametricBand_defaultFilterType_isPeak() async throws {
         // JSON without filterType should default to .peak
         let json = """
         {"frequency": 500.0, "gain": 3.0, "q": 1.0}
@@ -47,7 +51,7 @@ final class AutoEQModelsTests: XCTestCase {
         )
     }
 
-    func testParametricBand_allFilterTypes_codable() throws {
+    func testParametricBand_allFilterTypes_codable() async throws {
         let filterTypes: [FilterType] = [.peak, .lowShelf, .highShelf, .lowPass, .highPass, .notch]
 
         for type in filterTypes {
@@ -62,7 +66,7 @@ final class AutoEQModelsTests: XCTestCase {
         }
     }
 
-    func testParametricBand_uniqueIDs() {
+    func testParametricBand_uniqueIDs() async {
         let band1 = ParametricBand(frequency: 1000, gain: 0, q: 1.0)
         let band2 = ParametricBand(frequency: 1000, gain: 0, q: 1.0)
 
@@ -75,7 +79,7 @@ final class AutoEQModelsTests: XCTestCase {
 
     // MARK: - EQPreset Tests
 
-    func testEQPreset_codableRoundtrip() throws {
+    func testEQPreset_codableRoundtrip() async throws {
         let bands = [
             ParametricBand(frequency: 100, gain: 3.0, q: 0.7, filterType: .lowShelf),
             ParametricBand(frequency: 1000, gain: -2.0, q: 1.4, filterType: .peak),
@@ -102,7 +106,7 @@ final class AutoEQModelsTests: XCTestCase {
         XCTAssertEqual(decoded.bands.count, original.bands.count)
     }
 
-    func testEQPreset_computedProperties() {
+    func testEQPreset_computedProperties() async {
         let preset = EQPreset(
             id: "test",
             name: "My Preset",
@@ -119,7 +123,7 @@ final class AutoEQModelsTests: XCTestCase {
 
     // MARK: - FilterType Tests
 
-    func testFilterType_rawValues() {
+    func testFilterType_rawValues() async {
         XCTAssertEqual(FilterType.peak.rawValue, "PK")
         XCTAssertEqual(FilterType.lowShelf.rawValue, "LS")
         XCTAssertEqual(FilterType.highShelf.rawValue, "HS")
@@ -130,14 +134,14 @@ final class AutoEQModelsTests: XCTestCase {
         XCTAssertEqual(FilterType.notch.rawValue, "NO")
     }
 
-    func testFilterType_caseIterable() {
+    func testFilterType_caseIterable() async {
         // Should have all 9 cases
         XCTAssertEqual(FilterType.allCases.count, 9)
     }
 
     // MARK: - PresetSource Tests
 
-    func testPresetSource_rawValues() {
+    func testPresetSource_rawValues() async {
         XCTAssertEqual(PresetSource.opra.rawValue, "OPRA")
         XCTAssertEqual(PresetSource.autoeq.rawValue, "AutoEQ")
         XCTAssertEqual(PresetSource.custom.rawValue, "Custom")
@@ -146,7 +150,7 @@ final class AutoEQModelsTests: XCTestCase {
 
     // MARK: - AutoEQConstants Tests
 
-    func testAutoEQConstants_tenBandFrequencies() {
+    func testAutoEQConstants_tenBandFrequencies() async {
         let freqs = AutoEQConstants.tenBandFrequencies
         XCTAssertEqual(freqs.count, 10, "Should have exactly 10 frequencies")
         XCTAssertEqual(freqs.first ?? 0, 31.5, accuracy: 0.001)
@@ -162,7 +166,7 @@ final class AutoEQModelsTests: XCTestCase {
         }
     }
 
-    func testAutoEQConstants_thirtyOneBandFrequencies() {
+    func testAutoEQConstants_thirtyOneBandFrequencies() async {
         let freqs = AutoEQConstants.thirtyOneBandFrequencies
         XCTAssertEqual(freqs.count, 31, "Should have exactly 31 frequencies")
         XCTAssertEqual(freqs.first ?? 0, 20, accuracy: 0.001)
@@ -177,7 +181,7 @@ final class AutoEQModelsTests: XCTestCase {
         }
     }
 
-    func testAutoEQConstants_thirtyOneCenters_matchesFrequencies() {
+    func testAutoEQConstants_thirtyOneCenters_matchesFrequencies() async {
         XCTAssertEqual(
             AutoEQConstants.thirtyOneCenters,
             AutoEQConstants.thirtyOneBandFrequencies,
@@ -187,7 +191,7 @@ final class AutoEQModelsTests: XCTestCase {
 
     // MARK: - HeadphoneModel Tests
 
-    func testHeadphoneModel_init() {
+    func testHeadphoneModel_init() async {
         let model = HeadphoneModel(
             id: "hd600",
             name: "Sennheiser HD 600",
@@ -203,12 +207,12 @@ final class AutoEQModelsTests: XCTestCase {
 
     // MARK: - BandMode Tests
 
-    func testBandMode_rawValues() {
+    func testBandMode_rawValues() async {
         XCTAssertEqual(BandMode.ten.rawValue, "10")
         XCTAssertEqual(BandMode.thirtyOne.rawValue, "31")
     }
 
-    func testDatabaseCandidate_usesStableDatabasePath() {
+    func testDatabaseCandidate_usesStableDatabasePath() async {
         let headphone = DatabaseHeadphone(
             id: 42,
             brand: "Sennheiser",
@@ -238,7 +242,7 @@ final class AutoEQModelsTests: XCTestCase {
         XCTAssertEqual(AutoEQView.databaseCandidate(rebuiltDatabaseRow).path, candidate.path)
     }
 
-    func testDirectBands_preservesDatabaseGains() throws {
+    func testDirectBands_preservesDatabaseGains() async throws {
         let centers = [31.5, 63.0, 125.0]
         let gains: [Float] = [-1.5, 2.25, 0.0]
 
@@ -248,12 +252,12 @@ final class AutoEQModelsTests: XCTestCase {
         XCTAssertEqual(bands.map(\.gain), gains.map(Double.init))
     }
 
-    func testDirectBands_rejectsInvalidDatabaseRows() {
+    func testDirectBands_rejectsInvalidDatabaseRows() async {
         XCTAssertNil(AutoEQView.directBands(centers: [31.5], gains: []))
         XCTAssertNil(AutoEQView.directBands(centers: [31.5], gains: [.nan]))
     }
 
-    func testBundledDatabase_providesSearchableTenAndThirtyOneBandPreset() throws {
+    func testBundledDatabase_providesSearchableTenAndThirtyOneBandPreset() async throws {
         let database = EQDatabase.shared
         XCTAssertTrue(database.isAvailable)
 
@@ -276,7 +280,7 @@ final class AutoEQModelsTests: XCTestCase {
         ))
     }
 
-    func testDatabaseServiceLoadsBothModesWithoutView() throws {
+    func testDatabaseServiceLoadsBothModesWithoutView() async throws {
         let service = AutoEQDatabaseService(database: .shared)
         let id = try XCTUnwrap(service.headphoneID(
             brand: "Sennheiser", model: "HD 800", source: "Innerfidelity"
@@ -288,7 +292,7 @@ final class AutoEQModelsTests: XCTestCase {
         XCTAssertNil(service.load(headphoneID: -1))
     }
 
-    func testExactHeadphoneLookupPreservesSourceAndRejectsPartialIdentity() throws {
+    func testExactHeadphoneLookupPreservesSourceAndRejectsPartialIdentity() async throws {
         let database = EQDatabase.shared
         let headphone = try XCTUnwrap(database.headphone(
             brand: "Sennheiser", model: "HD 800", source: "Innerfidelity"
@@ -303,7 +307,7 @@ final class AutoEQModelsTests: XCTestCase {
         XCTAssertNil(database.headphone(brand: "Sennheiser", model: "HD 800", source: "missing"))
     }
 
-    func testBundledDatabase_presetMetadataFallsBackWhenStoredFieldsAreEmpty() throws {
+    func testBundledDatabase_presetMetadataFallsBackWhenStoredFieldsAreEmpty() async throws {
         let database = EQDatabase.shared
         XCTAssertTrue(database.isAvailable)
 

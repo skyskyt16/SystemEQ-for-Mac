@@ -1,3 +1,7 @@
+// Async XCTest entry points avoid the isolated-deinit runtime crash.
+// https://github.com/swiftlang/swift/issues/87316
+// swiftformat:disable redundantAsync
+
 //
 //  PresetPersistenceTests.swift
 //  SystemEQ for MacTests
@@ -8,6 +12,7 @@
 @testable import SystemEQ_for_Mac
 import XCTest
 
+@MainActor
 final class PresetPersistenceTests: XCTestCase {
     // Ізольований suite: тест-хост — реальний застосунок, і запис у .standard
     // стирав би справжній збережений пресет користувача.
@@ -30,7 +35,7 @@ final class PresetPersistenceTests: XCTestCase {
 
     // Тест-хост — реальний застосунок: запис повз ізольований suite стирав би
     // справжній збережений пресет користувача при кожному прогоні тестів.
-    func testSuiteIsolation_standardDefaultsUntouched() {
+    func testSuiteIsolation_standardDefaultsUntouched() async {
         let standard = UserDefaults.standard
         let before = standard.string(forKey: "lastPreset.mode")
 
@@ -42,7 +47,7 @@ final class PresetPersistenceTests: XCTestCase {
 
     // MARK: - Save & Load Roundtrip
 
-    func testSaveAndLoad_tenBandMode_roundtrip() {
+    func testSaveAndLoad_tenBandMode_roundtrip() async {
         let mode = EQBandMode.tenBand
         let gains: [Float] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
         let preamp: Float = 3.5
@@ -71,7 +76,7 @@ final class PresetPersistenceTests: XCTestCase {
         }
     }
 
-    func testSaveAndLoad_thirtyOneBandMode() {
+    func testSaveAndLoad_thirtyOneBandMode() async {
         let mode = EQBandMode.thirtyOneBand
         let gains: [Float] = Array(repeating: -3.0, count: 31)
         let preamp: Float = -1.5
@@ -84,7 +89,7 @@ final class PresetPersistenceTests: XCTestCase {
         XCTAssertEqual(loaded?.gains.count, 31)
     }
 
-    func testSaveAndLoad_zeroGains() {
+    func testSaveAndLoad_zeroGains() async {
         let gains: [Float] = Array(repeating: 0.0, count: 10)
         PresetPersistence.save(mode: .tenBand, gains: gains, preamp: 0.0)
 
@@ -95,7 +100,7 @@ final class PresetPersistenceTests: XCTestCase {
         XCTAssertEqual(loaded.preamp, 0.0, accuracy: 0.001)
     }
 
-    func testSaveAndLoad_negativeValues() {
+    func testSaveAndLoad_negativeValues() async {
         let gains: [Float] = [-12.0, -6.0, -3.0, 0.0, 3.0, 6.0, 12.0, -1.0, 0.5, -0.5]
         let preamp: Float = -5.0
         PresetPersistence.save(mode: .tenBand, gains: gains, preamp: preamp)
@@ -116,7 +121,7 @@ final class PresetPersistenceTests: XCTestCase {
 
     // MARK: - Clear
 
-    func testClear_removesData() {
+    func testClear_removesData() async {
         PresetPersistence.save(mode: .tenBand, gains: [1, 2, 3], preamp: 1.0)
         XCTAssertTrue(PresetPersistence.hasSavedPreset, "Should have preset after save")
 
@@ -124,7 +129,7 @@ final class PresetPersistenceTests: XCTestCase {
         XCTAssertFalse(PresetPersistence.hasSavedPreset, "Should not have preset after clear")
     }
 
-    func testLoad_afterClear_returnsNil() {
+    func testLoad_afterClear_returnsNil() async {
         PresetPersistence.save(mode: .tenBand, gains: [1], preamp: 0)
         PresetPersistence.clear()
 
@@ -134,14 +139,14 @@ final class PresetPersistenceTests: XCTestCase {
 
     // MARK: - hasSavedPreset
 
-    func testHasSavedPreset_initiallyFalse() {
+    func testHasSavedPreset_initiallyFalse() async {
         XCTAssertFalse(
             PresetPersistence.hasSavedPreset,
             "Should be false with no saved data"
         )
     }
 
-    func testHasSavedPreset_trueAfterSave() {
+    func testHasSavedPreset_trueAfterSave() async {
         PresetPersistence.save(mode: .tenBand, gains: [0], preamp: 0)
         XCTAssertTrue(
             PresetPersistence.hasSavedPreset,
@@ -151,7 +156,7 @@ final class PresetPersistenceTests: XCTestCase {
 
     // MARK: - Overwrite
 
-    func testSave_overwritesPrevious() {
+    func testSave_overwritesPrevious() async {
         PresetPersistence.save(mode: .tenBand, gains: [1, 2, 3], preamp: 1.0)
         PresetPersistence.save(mode: .thirtyOneBand, gains: Array(repeating: 5.0, count: 31), preamp: 2.0)
 
@@ -166,7 +171,7 @@ final class PresetPersistenceTests: XCTestCase {
 
     // MARK: - Default Bass Boost
 
-    func testSave_defaultBassBoost_isZero() {
+    func testSave_defaultBassBoost_isZero() async {
         PresetPersistence.save(mode: .tenBand, gains: [0], preamp: 0)
 
         guard let loaded = PresetPersistence.load() else {
@@ -183,7 +188,7 @@ final class PresetPersistenceTests: XCTestCase {
 
     // MARK: - Playback State
 
-    func testPlaybackState_roundtrip() {
+    func testPlaybackState_roundtrip() async {
         let gains: [Float] = [1, -2, 3, -4, 5, -6, 7, -8, 9, -10]
 
         PresetPersistence.savePlaybackState(mode: .tenBand, gains: gains, preamp: -4.5)
@@ -194,7 +199,7 @@ final class PresetPersistenceTests: XCTestCase {
         XCTAssertEqual(playback?.preamp, -4.5)
     }
 
-    func testPlaybackState_fallsBackToLegacyPreset() {
+    func testPlaybackState_fallsBackToLegacyPreset() async {
         let gains: [Float] = Array(repeating: 1.5, count: 31)
         PresetPersistence.save(mode: .thirtyOneBand, gains: gains, preamp: -2)
 
@@ -204,7 +209,7 @@ final class PresetPersistenceTests: XCTestCase {
         XCTAssertEqual(playback?.preamp, -2)
     }
 
-    func testClear_removesPlaybackState() {
+    func testClear_removesPlaybackState() async {
         PresetPersistence.savePlaybackState(mode: .tenBand, gains: Array(repeating: 1, count: 10), preamp: 0)
 
         PresetPersistence.clear()

@@ -1,9 +1,14 @@
+// Synchronous XCTest invocations can crash isolated deinit on older Swift runtimes.
+// Keep async entry points: https://github.com/swiftlang/swift/issues/87316
+// swiftformat:disable redundantAsync
+
 import Foundation
 @testable import SystemEQ_for_Mac
 import XCTest
 
+@MainActor
 final class EQResetTests: XCTestCase {
-    func testResetClearsBothBandModesPreampAndPendingSliderWrites() throws {
+    func testResetClearsBothBandModesPreampAndPendingSliderWrites() async throws {
         let suiteName = "EQResetTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -18,7 +23,7 @@ final class EQResetTests: XCTestCase {
 
             // Allow previously scheduled mode changes, DSP sync and persistence
             // to run; none may restore nonzero gains after the reset.
-            RunLoop.main.run(until: Date().addingTimeInterval(0.35))
+            try await Task.sleep(nanoseconds: 350_000_000)
             XCTAssertEqual(engine.bandMode, mode)
             XCTAssertEqual(engine.bands.map(\.gain), Array(repeating: 0, count: mode.bandCount))
             XCTAssertEqual(engine.preampGain, 0)
@@ -41,7 +46,7 @@ final class EQResetTests: XCTestCase {
         }
     }
 
-    func testResetImmediatelyAfterModeSwitchResetsAll31Bands() throws {
+    func testResetImmediatelyAfterModeSwitchResetsAll31Bands() async throws {
         let suiteName = "EQResetTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }

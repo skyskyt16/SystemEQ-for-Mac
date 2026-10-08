@@ -1,3 +1,7 @@
+// Synchronous XCTest invocations can crash isolated deinit on older Swift runtimes.
+// Keep async entry points: https://github.com/swiftlang/swift/issues/87316
+// swiftformat:disable redundantAsync
+
 //
 //  DevicePresetManagerTests.swift
 //  SystemEQ for MacTests
@@ -38,7 +42,7 @@ final class DevicePresetManagerTests: XCTestCase {
         )
     }
 
-    func testRecordApply_roundtripPerDevice() {
+    func testRecordApply_roundtripPerDevice() async {
         let manager = DevicePresetManager.shared
         let scarlett = makeRecord(name: "HE400se")
         let speakers = makeRecord(name: "eris")
@@ -51,7 +55,7 @@ final class DevicePresetManagerTests: XCTestCase {
         XCTAssertNil(manager.record(for: "unknown-uid"))
     }
 
-    func testRemovePresetDoesNotRestoreItOnDeviceSwitchOrDeleteOtherDevices() throws {
+    func testRemovePresetDoesNotRestoreItOnDeviceSwitchOrDeleteOtherDevices() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: Self.suiteName))
         defaults.set(true, forKey: DevicePresetManager.autoSwitchKey)
         let manager = DevicePresetManager.shared
@@ -69,7 +73,7 @@ final class DevicePresetManagerTests: XCTestCase {
         XCTAssertEqual(engine.preampGain, 0)
     }
 
-    func testRecordApply_overwritesSameDevice() {
+    func testRecordApply_overwritesSameDevice() async {
         let manager = DevicePresetManager.shared
 
         manager.recordApply(makeRecord(name: "old"), outputUID: "uid")
@@ -79,7 +83,7 @@ final class DevicePresetManagerTests: XCTestCase {
         XCTAssertEqual(manager.record(for: "uid"), newer)
     }
 
-    func testSuiteIsolation_standardDefaultsUntouched() {
+    func testSuiteIsolation_standardDefaultsUntouched() async {
         let before = UserDefaults.standard.data(forKey: "devicePresets.v1")
 
         DevicePresetManager.shared.recordApply(makeRecord(name: "x"), outputUID: "uid")
@@ -87,7 +91,7 @@ final class DevicePresetManagerTests: XCTestCase {
         XCTAssertEqual(UserDefaults.standard.data(forKey: "devicePresets.v1"), before)
     }
 
-    func testOutputChanged_unmappedDeviceAppliesFlatEQ() throws {
+    func testOutputChanged_unmappedDeviceAppliesFlatEQ() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: Self.suiteName))
         defaults.set(true, forKey: DevicePresetManager.autoSwitchKey)
         defaults.set("{\"name\":\"headphones\"}", forKey: "lastAppliedPresetJSON")
@@ -113,7 +117,7 @@ final class DevicePresetManagerTests: XCTestCase {
         XCTAssertEqual(saved.bassBoost, 0)
     }
 
-    func testOutputChanged_sameDescriptorStillAppliesDeviceValues() throws {
+    func testOutputChanged_sameDescriptorStillAppliesDeviceValues() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: Self.suiteName))
         defaults.set(true, forKey: DevicePresetManager.autoSwitchKey)
         let record = makeRecord(name: "same")
@@ -134,7 +138,7 @@ final class DevicePresetManagerTests: XCTestCase {
         XCTAssertEqual(engine.preampGain, record.preamp)
     }
 
-    func testOutputChanged_mappedDeviceSwitchesBandModeBeforeApplyingValues() throws {
+    func testOutputChanged_mappedDeviceSwitchesBandModeBeforeApplyingValues() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: Self.suiteName))
         defaults.set(true, forKey: DevicePresetManager.autoSwitchKey)
         let record = makeRecord(name: "thirty-one-band")
@@ -154,7 +158,7 @@ final class DevicePresetManagerTests: XCTestCase {
         XCTAssertEqual(engine.preampGain, record.preamp)
     }
 
-    func testOutputChanged_autoSwitchDisabledLeavesCurrentEQUntouched() throws {
+    func testOutputChanged_autoSwitchDisabledLeavesCurrentEQUntouched() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: Self.suiteName))
         let engine = AudioEngine(
             defaults: defaults,
@@ -169,7 +173,7 @@ final class DevicePresetManagerTests: XCTestCase {
         XCTAssertEqual(engine.bands.map(\.gain), gains)
     }
 
-    func testOutputChanged_invalidDeviceRecordAppliesFlatEQ() throws {
+    func testOutputChanged_invalidDeviceRecordAppliesFlatEQ() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: Self.suiteName))
         defaults.set(true, forKey: DevicePresetManager.autoSwitchKey)
         let invalid = DevicePresetRecord(

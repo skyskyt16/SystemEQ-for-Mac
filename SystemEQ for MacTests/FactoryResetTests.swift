@@ -1,9 +1,14 @@
+// Async XCTest entry points avoid the isolated-deinit runtime crash.
+// https://github.com/swiftlang/swift/issues/87316
+// swiftformat:disable redundantAsync
+
 import Foundation
 @testable import SystemEQ_for_Mac
 import XCTest
 
+@MainActor
 final class FactoryResetTests: XCTestCase {
-    func testFactoryResetRemovesOwnedDataAndPreservesSourceFilesAndOtherDomains() throws {
+    func testFactoryResetRemovesOwnedDataAndPreservesSourceFilesAndOtherDomains() async throws {
         let suiteName = "FactoryResetTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         let otherName = suiteName + ".other"

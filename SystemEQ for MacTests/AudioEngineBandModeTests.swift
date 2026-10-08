@@ -1,3 +1,7 @@
+// Synchronous XCTest invocations can crash isolated deinit on older Swift runtimes.
+// Keep async entry points: https://github.com/swiftlang/swift/issues/87316
+// swiftformat:disable redundantAsync
+
 //
 //  AudioEngineBandModeTests.swift
 //  SystemEQ for MacTests
@@ -11,6 +15,7 @@ import CoreAudio
 @testable import SystemEQ_for_Mac
 import XCTest
 
+@MainActor
 final class AudioEngineBandModeTests: XCTestCase {
     override func tearDown() {
         let engine = AudioEngine.shared
@@ -25,14 +30,14 @@ final class AudioEngineBandModeTests: XCTestCase {
 
     // MARK: - Same-turn mode switch + apply
 
-    func testAutoEQBandModeMatchesRestoredAudioEngineMode() {
+    func testAutoEQBandModeMatchesRestoredAudioEngineMode() async {
         XCTAssertEqual(AutoEQView.BandMode(audioEngineMode: .tenBand), .ten)
         XCTAssertEqual(AutoEQView.BandMode(audioEngineMode: .thirtyOneBand), .thirtyOne)
         XCTAssertEqual(AutoEQView.BandMode.ten.audioEngineMode, .tenBand)
         XCTAssertEqual(AutoEQView.BandMode.thirtyOne.audioEngineMode, .thirtyOneBand)
     }
 
-    func testApplyEQValues_rightAfterSwitchTo31Band_appliesAll31() {
+    func testApplyEQValues_rightAfterSwitchTo31Band_appliesAll31() async {
         let engine = AudioEngine.shared
         engine.bandMode = .tenBand
         engine.syncBandsToMode()
@@ -47,7 +52,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(engine.bands.map(\.gain), values, "all 31 gains must be applied")
     }
 
-    func testApplyEQValues_rightAfterSwitchBackTo10Band_appliesAll10() {
+    func testApplyEQValues_rightAfterSwitchBackTo10Band_appliesAll10() async {
         let engine = AudioEngine.shared
         engine.bandMode = .thirtyOneBand
         engine.syncBandsToMode()
@@ -61,7 +66,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(engine.bands.map(\.gain), values, "all 10 gains must be applied")
     }
 
-    func testApplyEQValues_countMismatch_stillRejected() {
+    func testApplyEQValues_countMismatch_stillRejected() async {
         let engine = AudioEngine.shared
         engine.bandMode = .tenBand
         engine.syncBandsToMode()
@@ -72,7 +77,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(engine.bands.map(\.gain), Array(repeating: Float(0), count: 10))
     }
 
-    func testSetPreampGainRebuildsTheActiveFilter() throws {
+    func testSetPreampGainRebuildsTheActiveFilter() async throws {
         let suiteName = "AudioEngineBandModeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -101,7 +106,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(right[0], Float(0.25 * pow(10.0, 6.0 / 20.0)), accuracy: 0.0001)
     }
 
-    func testCoreAudioRenderBypassFollowsEnabledState() {
+    func testCoreAudioRenderBypassFollowsEnabledState() async {
         let audioEngine = AudioEngine.shared
         let coreEngine = CoreAudioEngine.shared
         audioEngine.bandMode = .tenBand
@@ -151,7 +156,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(right[0], expected, accuracy: 0.0001)
     }
 
-    func testConcurrentFilterSwapAndRenderStress() {
+    func testConcurrentFilterSwapAndRenderStress() async {
         let coreEngine = CoreAudioEngine.shared
         coreEngine.setEnabled(true)
         coreEngine.applyFixedBandEQ(Array(repeating: 0, count: 10))
@@ -181,11 +186,11 @@ final class AudioEngineBandModeTests: XCTestCase {
             coreEngine.applyFixedBandEQ(Array(repeating: gain, count: 10))
         }
 
-        wait(for: [renderFinished], timeout: 10)
+        await fulfillment(of: [renderFinished], timeout: 10)
         coreEngine.clearEQ()
     }
 
-    func testOutputBoostIsClampedAndPersisted() throws {
+    func testOutputBoostIsClampedAndPersisted() async throws {
         let suiteName = "AudioEngineBandModeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -201,13 +206,13 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(defaults.float(forKey: "outputBoostGain"), 12)
     }
 
-    func testCoreAudioOutputBoostUsesSharedMaximum() {
+    func testCoreAudioOutputBoostUsesSharedMaximum() async {
         XCTAssertEqual(CoreAudioEngine.sanitizedOutputBoost(12), 12)
         XCTAssertEqual(CoreAudioEngine.sanitizedOutputBoost(20), OutputSafetyProcessor.maximumBoostDB)
         XCTAssertEqual(CoreAudioEngine.sanitizedOutputBoost(.nan), 0)
     }
 
-    func testAutoPreampUsesCombinedFilterResponse() {
+    func testAutoPreampUsesCombinedFilterResponse() async {
         var gains = [Float](repeating: 0, count: 10)
         gains[5] = 6
         gains[6] = 6
@@ -218,7 +223,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertGreaterThan(recommended, -12)
     }
 
-    func testAutoPreampLeavesFlatEQAtUnity() {
+    func testAutoPreampLeavesFlatEQAtUnity() async {
         let recommended = FixedBandAutoPreamp.recommendedGain(
             mode: .thirtyOneBand,
             gains: [Float](repeating: 0, count: 31)
@@ -227,7 +232,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(recommended, 0, accuracy: 0.0001)
     }
 
-    func testManualPreampIsPersisted() throws {
+    func testManualPreampIsPersisted() async throws {
         let suiteName = "AudioEngineBandModeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -242,7 +247,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(PresetPersistence.loadPlaybackState(in: defaults)?.preamp, -7.5)
     }
 
-    func testRestorePresetDefaultsRestoresBandsBassBoostAndPreamp() throws {
+    func testRestorePresetDefaultsRestoresBandsBassBoostAndPreamp() async throws {
         let suiteName = "AudioEngineBandModeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
@@ -275,7 +280,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(PresetPersistence.loadPlaybackState(in: defaults)?.gains, expected)
     }
 
-    func testRestorePresetDefaultsWithoutPresetLeavesCurrentValuesUntouched() throws {
+    func testRestorePresetDefaultsWithoutPresetLeavesCurrentValuesUntouched() async throws {
         let suiteName = "AudioEngineBandModeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
@@ -302,7 +307,7 @@ final class AudioEngineBandModeTests: XCTestCase {
     // MARK: - CoreAudioEngine guard rails
 
     // Раніше frequencies[index] за масивом з 31 значення падав out-of-bounds.
-    func testApplyFixedBandEQ_oversizedGains_doesNotCrash() {
+    func testApplyFixedBandEQ_oversizedGains_doesNotCrash() async {
         let gains = [Float](repeating: 1.0, count: 31)
 
         CoreAudioEngine.shared.applyFixedBandEQ(gains, preamp: 0)
@@ -313,7 +318,7 @@ final class AudioEngineBandModeTests: XCTestCase {
 
     // MARK: - Startup state persistence
 
-    func testSetEnabled_routingFailureWithoutPersistence_preservesIntent() throws {
+    func testSetEnabled_routingFailureWithoutPersistence_preservesIntent() async throws {
         let suiteName = "AudioEngineBandModeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -336,7 +341,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertFalse(CoreAudioEngine.shared.isEnabled)
     }
 
-    func testSetEnabled_routingFailureFromUserAction_disablesFutureRestore() throws {
+    func testSetEnabled_routingFailureFromUserAction_disablesFutureRestore() async throws {
         let suiteName = "AudioEngineBandModeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -354,7 +359,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertFalse(CoreAudioEngine.shared.isEnabled)
     }
 
-    func testSetEnabled_routingSuccessFromUserAction_persistsEnabledState() throws {
+    func testSetEnabled_routingSuccessFromUserAction_persistsEnabledState() async throws {
         let suiteName = "AudioEngineBandModeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -377,7 +382,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertTrue(CoreAudioEngine.shared.isEnabled)
     }
 
-    func testRoutingControlsDelegateToAudioEngine() throws {
+    func testRoutingControlsDelegateToAudioEngine() async throws {
         let suiteName = "AudioEngineBandModeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -400,7 +405,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertFalse(CoreAudioEngine.shared.isEnabled)
     }
 
-    func testSetEnabled_reappliesFiltersAfterRoutingStarts() throws {
+    func testSetEnabled_reappliesFiltersAfterRoutingStarts() async throws {
         let suiteName = "AudioEngineBandModeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -432,7 +437,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(right[0], Float(0.25 * pow(10.0, 6.0 / 20.0)), accuracy: 0.0001)
     }
 
-    func testManualBandChangePersistsPlaybackState() throws {
+    func testManualBandChangePersistsPlaybackState() async throws {
         let suiteName = "AudioEngineBandModeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -453,10 +458,10 @@ final class AudioEngineBandModeTests: XCTestCase {
             persisted.fulfill()
         }
 
-        wait(for: [persisted], timeout: 1)
+        await fulfillment(of: [persisted], timeout: 1)
     }
 
-    func testSetEnabled_startupDisable_preservesSavedIntent() throws {
+    func testSetEnabled_startupDisable_preservesSavedIntent() async throws {
         let suiteName = "AudioEngineBandModeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -476,7 +481,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertFalse(CoreAudioEngine.shared.isEnabled)
     }
 
-    func testOutputVolumeTransferCopiesAvailableState() {
+    func testOutputVolumeTransferCopiesAvailableState() async {
         let state = OutputVolumeState(scalar: 0.75, isMuted: true)
         var readDevice: AudioDeviceID?
         var writtenState: OutputVolumeState?
@@ -502,7 +507,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(writtenDevice, 2)
     }
 
-    func testOutputVolumeTransferSkipsMissingState() {
+    func testOutputVolumeTransferSkipsMissingState() async {
         var didWrite = false
         let transferred = OutputVolumeTransfer.transfer(
             from: 1,
@@ -518,7 +523,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertFalse(didWrite)
     }
 
-    func testOutputVolumeTransferUsesFallbackForFixedVolumeDevice() {
+    func testOutputVolumeTransferUsesFallbackForFixedVolumeDevice() async {
         let fallback = OutputVolumeState(scalar: 1, isMuted: nil)
         var writtenState: OutputVolumeState?
 
@@ -537,7 +542,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(writtenState, fallback)
     }
 
-    func testNewDefaultOutputRequestInvalidatesPreviousVerification() {
+    func testNewDefaultOutputRequestInvalidatesPreviousVerification() async {
         XCTAssertFalse(DefaultOutputVerificationPolicy.shouldVerify(
             requestGeneration: 1,
             currentGeneration: 2
@@ -548,7 +553,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         ))
     }
 
-    func testFailedNativeStartRestoresPreviousPhysicalOutputOnly() {
+    func testFailedNativeStartRestoresPreviousPhysicalOutputOnly() async {
         let previous = AudioDevice(
             id: 1,
             name: "Built-in Output",
@@ -601,7 +606,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         }
     }
 
-    func testProcessTapTestToneRestartResetsPhaseAndStopBypassesGeneration() {
+    func testProcessTapTestToneRestartResetsPhaseAndStopBypassesGeneration() async {
         let engine = CoreAudioEngine.shared
         engine.stop()
         engine.prepareProcessTap(sampleRate: 48000, outputDeviceID: 1, bufferFrames: 64)
@@ -660,7 +665,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(right, [Float](repeating: -0.25, count: 64))
     }
 
-    func testBlackHoleGainStagingUsesOneVolumeStage() throws {
+    func testBlackHoleGainStagingUsesOneVolumeStage() async throws {
         let physical = AudioDeviceID(1)
         let virtual = AudioDeviceID(2)
         var states: [AudioDeviceID: OutputVolumeState] = try [
@@ -690,7 +695,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(physicalState.isMuted, false)
     }
 
-    func testBlackHoleGainStagingRejectsUnverifiedPhysicalUnity() throws {
+    func testBlackHoleGainStagingRejectsUnverifiedPhysicalUnity() async throws {
         let physical = AudioDeviceID(1)
         let state = try XCTUnwrap(OutputVolumeState(scalar: 0.181, isMuted: false))
 
@@ -703,7 +708,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertFalse(result)
     }
 
-    func testBlackHoleInputVolumeChangeRestoresExpectedOutput() {
+    func testBlackHoleInputVolumeChangeRestoresExpectedOutput() async {
         guard case .restoreExpected = BlackHoleVolumeChangePolicy.action(
             for: [kAudioObjectPropertyScopeInput]
         ) else {
@@ -711,7 +716,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         }
     }
 
-    func testBlackHoleOutputVolumeChangeAcceptsKeyboardAdjustment() {
+    func testBlackHoleOutputVolumeChangeAcceptsKeyboardAdjustment() async {
         guard case .acceptObserved = BlackHoleVolumeChangePolicy.action(
             for: [kAudioObjectPropertyScopeOutput]
         ) else {
@@ -724,7 +729,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         }
     }
 
-    func testBlackHoleRecoveryWritesOnlyChangedProperties() {
+    func testBlackHoleRecoveryWritesOnlyChangedProperties() async {
         guard let expected = OutputVolumeState(scalar: 1, isMuted: false),
               let volumeOnlyChange = OutputVolumeState(scalar: 0.226, isMuted: false),
               let muteOnlyChange = OutputVolumeState(scalar: 1, isMuted: true) else {
@@ -737,7 +742,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertTrue(BlackHoleVolumeChangePolicy.needsMuteWrite(from: muteOnlyChange, to: expected))
     }
 
-    func testPeakMeterAndRoutingMeterDiscardNonFiniteValues() {
+    func testPeakMeterAndRoutingMeterDiscardNonFiniteValues() async {
         XCTAssertEqual(PeakMeter.sanitizedPeak(.nan), 0)
         XCTAssertEqual(PeakMeter.sanitizedPeak(-0.25), 0)
         XCTAssertEqual(RoutingView.normalizedPeak(.infinity), 0)
@@ -752,7 +757,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(smoothedPeak, 0.25)
     }
 
-    func testPeakMeterLevelSnapshotRoundTrip() {
+    func testPeakMeterLevelSnapshotRoundTrip() async {
         let packed = PeakMeter.packLevels(input: 0.25, output: 0.75)
         let unpacked = PeakMeter.unpackLevels(packed)
 
@@ -760,19 +765,19 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(unpacked.output, 0.75)
     }
 
-    func testLimiterIndicatorUsesActualGainReductionThresholds() {
+    func testLimiterIndicatorUsesActualGainReductionThresholds() async {
         XCTAssertEqual(LimiterIndicatorState.state(for: 0), .normal)
         XCTAssertEqual(LimiterIndicatorState.state(for: 0.1), .mild)
         XCTAssertEqual(LimiterIndicatorState.state(for: 2.9), .mild)
         XCTAssertEqual(LimiterIndicatorState.state(for: 3), .heavy)
     }
 
-    func testRoutingMeterTreatsDecayedSilenceAsZero() {
+    func testRoutingMeterTreatsDecayedSilenceAsZero() async {
         XCTAssertEqual(RoutingView.normalizedPeak(0.00005), 0)
         XCTAssertEqual(RoutingView.nextSmoothedPeak(current: 0.00005, incoming: 0, smoothingFactor: 0.3), 0)
     }
 
-    func testDiagnosticEventStoreKeepsOnlyNewestEvents() {
+    func testDiagnosticEventStoreKeepsOnlyNewestEvents() async {
         let store = DiagnosticEventStore(capacity: 2)
         store.record("routing.enable.request", details: ["outputKind": "usbAudio"])
         store.record("routing.volumeTransfer", details: ["requestedScalar": "1.000"])
@@ -786,7 +791,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertTrue(store.reportText().contains("discarded older events: 1"))
     }
 
-    func testDiagnosticHistoryRemainsBoundedWithLargeUnicodeEntries() {
+    func testDiagnosticHistoryRemainsBoundedWithLargeUnicodeEntries() async {
         let store = DiagnosticEventStore(capacity: 1000)
         let text = String(repeating: "🎵\n", count: 1000)
         let details = Dictionary(uniqueKeysWithValues: (0..<40).map { ("field\($0)", text) })
@@ -810,7 +815,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertTrue(store.reportText().contains("discarded older events: 10"))
     }
 
-    func testDiagnosticSessionDistinguishesInterruptedAndCleanExit() {
+    func testDiagnosticSessionDistinguishesInterruptedAndCleanExit() async {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let url = directory.appendingPathComponent("diagnostics.json")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -833,7 +838,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         clean.finishSession()
     }
 
-    func testInterruptedSessionSurvivesRepeatedCleanRelaunches() {
+    func testInterruptedSessionSurvivesRepeatedCleanRelaunches() async {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let url = directory.appendingPathComponent("diagnostics.json")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -852,7 +857,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         report.finishSession()
     }
 
-    func testNewestCleanSessionSurvivesFullInterruptedHistory() {
+    func testNewestCleanSessionSurvivesFullInterruptedHistory() async {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let url = directory.appendingPathComponent("diagnostics.json")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -871,11 +876,11 @@ final class AudioEngineBandModeTests: XCTestCase {
         report.finishSession()
     }
 
-    func testDiagnosticExecutableIdentityIsAvailable() {
+    func testDiagnosticExecutableIdentityIsAvailable() async {
         XCTAssertNotNil(UUID(uuidString: DiagnosticBuild.executableUUID))
     }
 
-    func testRingDiagnosticsDescribeReadAndResetWithoutChangingAudio() {
+    func testRingDiagnosticsDescribeReadAndResetWithoutChangingAudio() async {
         let ring = SPSCRingBuffer()
         ring.allocate(capacityFrames: 1024)
         let input = UnsafeMutablePointer<Float>.allocate(capacity: 1025)
@@ -912,7 +917,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(ring.lifetimeDiagnostics().underruns, 1)
     }
 
-    func testConcurrentRingDiagnosticSamplingPreservesUnderrunCount() {
+    func testConcurrentRingDiagnosticSamplingPreservesUnderrunCount() async {
         let ring = SPSCRingBuffer()
         ring.allocate(capacityFrames: 1024)
         let finished = expectation(description: "Ring reads completed")
@@ -932,18 +937,18 @@ final class AudioEngineBandModeTests: XCTestCase {
         for _ in 0..<1000 {
             total += Int64(ring.snapshotAndResetDiag().underruns)
         }
-        wait(for: [finished], timeout: 10)
+        await fulfillment(of: [finished], timeout: 10)
         total += Int64(ring.snapshotAndResetDiag().underruns)
         XCTAssertEqual(total, 100_000)
     }
 
-    func testNativeDiagnosticReportDoesNotClaimBlackHoleHealth() {
+    func testNativeDiagnosticReportDoesNotClaimBlackHoleHealth() async {
         let report = CoreAudioEngine.shared.diagnosticSummary(backend: .native)
         XCTAssertTrue(report.contains("not applicable"))
         XCTAssertFalse(report.contains("Underruns in interval"))
     }
 
-    func testProcessTapInputSelectsUniqueStereoTapStream() {
+    func testProcessTapInputSelectsUniqueStereoTapStream() async {
         let tap = processTapFormat(sampleRate: 48000, channels: 2)
         let mono = processTapFormat(sampleRate: 48000, channels: 1)
 
@@ -958,7 +963,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(selection, ProcessTapInputSelection(bufferIndex: 1))
     }
 
-    func testProcessTapInputUsesChannelBoundaryForAmbiguousDeviceInput() {
+    func testProcessTapInputUsesChannelBoundaryForAmbiguousDeviceInput() async {
         let tap = processTapFormat(sampleRate: 48000, channels: 2)
 
         let selection = ProcessTapInputSelection.select(
@@ -972,7 +977,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         XCTAssertEqual(selection, ProcessTapInputSelection(bufferIndex: 1))
     }
 
-    func testProcessTapInputRejectsNonFloatTapFormat() {
+    func testProcessTapInputRejectsNonFloatTapFormat() async {
         var tap = processTapFormat(sampleRate: 48000, channels: 2)
         tap.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked
 
@@ -985,7 +990,7 @@ final class AudioEngineBandModeTests: XCTestCase {
         ))
     }
 
-    func testAppDeclaresSystemAudioCaptureUsageDescription() {
+    func testAppDeclaresSystemAudioCaptureUsageDescription() async {
         let description = Bundle.main.object(forInfoDictionaryKey: "NSAudioCaptureUsageDescription") as? String
 
         XCTAssertFalse(description?.isEmpty ?? true)

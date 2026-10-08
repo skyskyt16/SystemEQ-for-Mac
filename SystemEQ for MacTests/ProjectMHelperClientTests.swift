@@ -1,8 +1,13 @@
+// Async XCTest entry points avoid the isolated-deinit runtime crash.
+// https://github.com/swiftlang/swift/issues/87316
+// swiftformat:disable redundantAsync
+
 @testable import SystemEQ_for_Mac
 import XCTest
 
+@MainActor
 final class ProjectMHelperClientTests: XCTestCase {
-    func testStartupCommandsReplayNonDefaultIntent() {
+    func testStartupCommandsReplayNonDefaultIntent() async {
         XCTAssertEqual(
             ProjectMHelperClient.startupCommands(
                 category: "Fractals",
@@ -15,7 +20,7 @@ final class ProjectMHelperClientTests: XCTestCase {
         )
     }
 
-    func testStartupCommandsOmitHelperDefaults() {
+    func testStartupCommandsOmitHelperDefaults() async {
         XCTAssertTrue(
             ProjectMHelperClient.startupCommands(
                 category: "All",
@@ -27,11 +32,11 @@ final class ProjectMHelperClientTests: XCTestCase {
         )
     }
 
-    func testReportedSelectionReplacesSynchronizedIntent() {
+    func testReportedSelectionReplacesSynchronizedIntent() async {
         XCTAssertTrue(ProjectMHelperClient.shouldAdoptReportedSelection(selected: "Heavy", current: "Heavy"))
     }
 
-    func testReportedSelectionDoesNotReplacePendingIntent() {
+    func testReportedSelectionDoesNotReplacePendingIntent() async {
         XCTAssertFalse(ProjectMHelperClient.shouldAdoptReportedSelection(selected: "Heavy", current: "All"))
     }
 }
