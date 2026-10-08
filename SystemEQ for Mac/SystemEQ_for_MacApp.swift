@@ -7,6 +7,7 @@
 
 import AVFoundation
 import Foundation
+import ServiceManagement
 import SwiftUI
 
 private let isRunningUnitTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
@@ -174,6 +175,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !isRunningUnitTests {
             ProjectMHelperClient.shared.stop()
             DiagnosticEventStore.shared.finishSession()
+        }
+        if FactoryReset.isRequested {
+            do {
+                // Login registration lives outside UserDefaults.
+                if SMAppService.mainApp.status != .notRegistered {
+                    try SMAppService.mainApp.unregister()
+                }
+                guard let domainName = Bundle.main.bundleIdentifier else {
+                    throw CocoaError(.fileNoSuchFile)
+                }
+                let fileManager = FileManager.default
+                try FactoryReset.clearStoredData(
+                    defaults: .standard,
+                    domainName: domainName,
+                    applicationSupportURL: fileManager.url(
+                        for: .applicationSupportDirectory, in: .userDomainMask,
+                        appropriateFor: nil, create: false
+                    ),
+                    documentsURL: fileManager.url(
+                        for: .documentDirectory, in: .userDomainMask,
+                        appropriateFor: nil, create: false
+                    )
+                )
+            } catch {
+                FactoryReset.isRequested = false
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = LocalizationManager.shared.localized(.factoryResetFailed)
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+                // Normal shutdown is already complete; do not resume a half-stopped app.
+                return .terminateNow
+            }
         }
         return .terminateNow
     }

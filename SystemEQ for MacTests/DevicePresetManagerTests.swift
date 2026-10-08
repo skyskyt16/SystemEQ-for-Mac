@@ -51,6 +51,24 @@ final class DevicePresetManagerTests: XCTestCase {
         XCTAssertNil(manager.record(for: "unknown-uid"))
     }
 
+    func testRemovePresetDoesNotRestoreItOnDeviceSwitchOrDeleteOtherDevices() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: Self.suiteName))
+        defaults.set(true, forKey: DevicePresetManager.autoSwitchKey)
+        let manager = DevicePresetManager.shared
+        manager.recordApply(makeRecord(name: "removed"), outputUID: "removed-uid")
+        let other = makeRecord(name: "keep")
+        manager.recordApply(other, outputUID: "other-uid")
+        manager.removePreset(outputUID: "removed-uid")
+        XCTAssertNil(manager.record(for: "removed-uid"))
+        XCTAssertEqual(manager.record(for: "other-uid"), other)
+        let engine = AudioEngine(defaults: defaults, enableRouting: { _ in true }, disableRouting: { _ in })
+        engine.applyEQValues(Array(repeating: 5, count: 10))
+        engine.setPreampGain(-4)
+        manager.outputChanged(to: "removed-uid", engine: engine)
+        XCTAssertEqual(engine.bands.map(\.gain), Array(repeating: 0, count: 10))
+        XCTAssertEqual(engine.preampGain, 0)
+    }
+
     func testRecordApply_overwritesSameDevice() {
         let manager = DevicePresetManager.shared
 

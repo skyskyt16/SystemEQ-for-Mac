@@ -258,6 +258,22 @@ brew upgrade --cask systemeq   # or: brew install --cask denzam/systemeq/systeme
 
 On Homebrew 5 and older the `trust` command does not exist — skip it.
 
+### Reset EQ or remove a preset
+
+In AutoEQ, **Reset** sets every band in the current 10- or 31-band mode and the
+preamp to **0 dB**, clears Bass Boost, and removes the active preset. The **×**
+beside the preset name does the same. The flat state survives a restart; the
+removed preset is also unassigned from the current output device. Favorites and
+presets assigned to other devices remain available. Output Boost and independent
+room correction are separate controls and are unchanged by this EQ reset.
+
+For a complete reset, open **Settings → Factory Reset** and confirm. This deletes
+all saved settings, preset favorites, device assignments, custom preset state,
+visualizer favorites, and calibration/hearing profiles, and disables launch at
+login. SystemEQ quits after restoring the physical audio output. Reopen it to
+start with factory defaults and onboarding. The bundled AutoEQ library, original
+imported files, installed BlackHole driver, and macOS permissions are preserved.
+
 ### The app asks for microphone access again after an update
 
 Expected. SystemEQ is ad-hoc signed, so its signature changes with every build

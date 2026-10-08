@@ -110,6 +110,7 @@ struct AutoEQView: View {
     // Відновлення UI при відкритті вікна ставить parsed, і вотчер .task(id: parsed)
     // застосував би пресет повторно поверх уже відновленого рушія — гасимо один раз.
     @State private var suppressNextAutoApply = false
+    @State private var presetGeneration: UInt64 = 0
 
     @State private var bassBoost: Double = 0
     @State private var rawText: String = ""
@@ -364,6 +365,15 @@ struct AutoEQView: View {
                     }
 
                     Spacer()
+
+                    Button {
+                        withAnimation(.spring(response: 0.3)) { removeActivePreset() }
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(localization.localized(.removeActivePreset))
+                    .accessibilityLabel(localization.localized(.removeActivePreset))
 
                     if canToggleCurrentFavorite {
                         Button {
@@ -641,12 +651,11 @@ struct AutoEQView: View {
 
                 HStack(spacing: AppSpacing.md) {
                     Button {
-                        withAnimation(.spring(response: 0.3)) { _ = audioEngine.restorePresetDefaults() }
+                        withAnimation(.spring(response: 0.3)) { removeActivePreset() }
                     } label: {
                         Label(localization.localized(.reset), systemImage: "arrow.counterclockwise")
                     }
                     .buttonStyle(.bordered)
-                    .disabled(!audioEngine.hasPresetDefaults)
 
                     Button {
                         withAnimation(.spring(response: 0.3)) { audioEngine.applyAutoPreamp() }
@@ -717,17 +726,23 @@ struct AutoEQView: View {
                         .font(AppTypography.mono)
                 }
 
-                Slider(value: $bassBoost, in: 0...6, step: 0.5)
-                    .onChange(of: bassBoost) { _ in
+                Slider(value: Binding(
+                    get: { bassBoost },
+                    set: { value in
+                        bassBoost = value
+                        let generation = presetGeneration
                         applyEQDebounceTask?.cancel()
                         applyEQDebounceTask = Task {
                             try? await Task.sleep(nanoseconds: 50_000_000)
                             guard !Task.isCancelled else { return }
                             await MainActor.run {
-                                applyToAudioEngine()
+                                guard generation == presetGeneration, !Task.isCancelled else { return }
+                                if mapped.isEmpty { mapped = mappedBands() }
+                                applyToAudioEngine(allowFlat: true)
                             }
                         }
                     }
+                ), in: 0...6, step: 0.5)
             }
         }
     }
@@ -1397,6 +1412,7 @@ struct AutoEQView: View {
 
     @MainActor
     private func importCandidate(_ c: SearchCandidate) async {
+        let generation = presetGeneration
         isSearching = true
         defer { isSearching = false }
         searchError = nil
@@ -1543,7 +1559,7 @@ struct AutoEQView: View {
 
         // 🎯 TIER 2: Cache hit (попередньо завантажений README)
         if let cached = readmeCache[c.path] {
-            await processReadmeText(cached, candidate: c)
+            processReadmeText(cached, candidate: c)
             return
         }
 
@@ -1562,6 +1578,7 @@ struct AutoEQView: View {
 
             // Try primary URL
             let (data, resp) = try await legacyRepository.session.data(from: url)
+            guard generation == presetGeneration, !Task.isCancelled else { return }
             if let http = resp as? HTTPURLResponse { statusCode = http.statusCode }
             if let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) {
                 text = String(data: data, encoding: .utf8) ?? ""
@@ -1576,6 +1593,7 @@ struct AutoEQView: View {
                 let rraw = AppConstants.URLs.autoEQRawBase + renc
                 if let rurl = URL(string: rraw) {
                     let (d2, r2) = try await legacyRepository.session.data(from: rurl)
+                    guard generation == presetGeneration, !Task.isCancelled else { return }
                     if let h2 = r2 as? HTTPURLResponse, (200...299).contains(h2.statusCode) {
                         text = String(data: d2, encoding: .utf8) ?? ""
                         ok = true
@@ -1608,6 +1626,7 @@ struct AutoEQView: View {
                         let url2s = AppConstants.URLs.autoEQRawBase + enc
                         guard let url2 = URL(string: url2s) else { continue }
                         let (d3, r3) = try await legacyRepository.session.data(from: url2)
+                        guard generation == presetGeneration, !Task.isCancelled else { return }
                         if let h3 = r3 as? HTTPURLResponse, (200...299).contains(h3.statusCode) {
                             text = String(data: d3, encoding: .utf8) ?? ""
                             ok = true
@@ -1625,8 +1644,9 @@ struct AutoEQView: View {
 
             // Cache and process
             readmeCache[c.path] = text
-            await processReadmeText(text, candidate: c)
+            processReadmeText(text, candidate: c)
         } catch {
+            guard generation == presetGeneration, !Task.isCancelled else { return }
             searchError = error.localizedDescription
         }
     }
@@ -1815,7 +1835,7 @@ struct AutoEQView: View {
     }
 
     @MainActor
-    private func processReadmeText(_ text: String, candidate: SearchCandidate) async {
+    private func processReadmeText(_ text: String, candidate: SearchCandidate) {
         // Parse both 10-band and 31-band versions
         let bands10 = parseFixedBandTable(text: text, bands: 10)
         let bands31 = parseFixedBandTable(text: text, bands: 31)
@@ -1957,8 +1977,8 @@ struct AutoEQView: View {
 
     // MARK: - Apply to AudioEngine
 
-    private func applyToAudioEngine() {
-        guard !mapped.isEmpty else {
+    private func applyToAudioEngine(allowFlat: Bool = false) {
+        guard !mapped.isEmpty, allowFlat || !parsed.isEmpty else {
             dlog("⚠️ No mapped bands to apply", category: .network)
             return
         }
@@ -2012,6 +2032,36 @@ struct AutoEQView: View {
         if !engine.isEnabled {
             engine.setEnabled(true)
         }
+    }
+
+    // MARK: - Reset
+
+    private func removeActivePreset() {
+        presetGeneration &+= 1
+        applyEQDebounceTask?.cancel()
+        applyEQDebounceTask = nil
+        suppressNextAutoApply = false
+        parsed = []
+        parsed10 = []
+        parsed31 = []
+        mapped = []
+        rawText = ""
+        preampDB = nil
+        preampDB10 = nil
+        preampDB31 = nil
+        bassBoost = 0
+        activePresetName = nil
+        activePresetSource = nil
+        activePresetTarget = nil
+        activePresetPath = nil
+        draggingBandIndex = nil
+        hoveredBandIndex = nil
+        lastAppliedPresetJSON = ""
+        lastCustomPresetText = ""
+        lastCustomPresetName = ""
+        PresetPersistence.clear()
+        DevicePresetManager.shared.removePreset()
+        audioEngine.resetAllBands()
     }
 
     // MARK: - Last Applied Preset (UI restore)

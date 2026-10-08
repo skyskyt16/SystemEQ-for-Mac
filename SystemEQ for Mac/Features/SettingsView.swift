@@ -14,6 +14,7 @@ struct SettingsView: View {
     @AppStorage("eqStartupMode") private var startupModeRaw: String = EQStartupMode.restoreLastState.rawValue
     @AppStorage(AudioRouter.backendPreferenceKey) private var audioBackendRaw =
         AudioRoutingBackendPreference.automatic.rawValue
+    @State private var showFactoryResetConfirmation = false
     @State private var isExportingDiagnostics = false
     @State private var diagnosticsExportMessage: String?
     @State private var diagnosticReportURL: URL?
@@ -48,16 +49,47 @@ struct SettingsView: View {
                 // EQ Database Section
                 databaseSection
 
+                factoryResetSection
+
                 diagnosticsSection
 
                 // Links Section
                 linksSection
             }
         }
+        .alert(localization.localized(.factoryReset), isPresented: $showFactoryResetConfirmation) {
+            Button(localization.localized(.cancel), role: .cancel) {}
+            Button(localization.localized(.factoryReset), role: .destructive) {
+                FactoryReset.isRequested = true
+                NSApp.terminate(nil)
+            }
+        } message: {
+            Text(localization.localized(.factoryResetConfirmation))
+        }
         .onAppear {
             dbStats = EQDatabase.shared.getDatabaseStats()
             dbVersion = EQDatabase.shared.getVersion()
         }
+    }
+
+    // MARK: - Factory Reset
+
+    private var factoryResetSection: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            Text(localization.localized(.factoryReset))
+                .font(AppTypography.heading2)
+            Text(localization.localized(.factoryResetDescription))
+                .font(AppTypography.bodySmall)
+                .foregroundStyle(.secondary)
+            Button(role: .destructive) {
+                showFactoryResetConfirmation = true
+            } label: {
+                Label(localization.localized(.factoryReset), systemImage: "arrow.counterclockwise")
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(AppSpacing.xl)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 
     // MARK: - Audio Backend Section

@@ -57,6 +57,14 @@ final class DevicePresetManager {
         saveMap(map)
     }
 
+    /// Removing a preset must also prevent it from returning on device switching.
+    func removePreset(outputUID: String? = nil) {
+        guard let uid = outputUID ?? AudioRouter.shared.selectedOutputDevice?.uid else { return }
+        var map = loadMap()
+        map.removeValue(forKey: uid)
+        saveMap(map)
+    }
+
     func record(for uid: String) -> DevicePresetRecord? {
         loadMap()[uid]
     }
