@@ -17,11 +17,18 @@ struct DevicePresetRecord: Codable, Equatable {
     let cleanGains: [Float] // без boost — для PresetPersistence
     let preamp: Float
     let bassBoost: Float
+    var outputName: String? = nil
     let descriptorJSON: String // дескриптор пресета для UI AutoEQ
+
+    var presetDisplayName: String? {
+        struct Name: Decodable { let name: String? }
+        guard let data = descriptorJSON.data(using: .utf8) else { return nil }
+        return (try? JSONDecoder().decode(Name.self, from: data))?.name
+    }
 }
 
 @MainActor
-final class DevicePresetManager {
+final class DevicePresetManager: ObservableObject {
     static let shared = DevicePresetManager()
 
     static let autoSwitchKey = "autoSwitchPresetPerDevice"
@@ -30,16 +37,22 @@ final class DevicePresetManager {
     // 🔧 Тести підміняють на ізольований suite — як у PresetPersistence
     nonisolated(unsafe) static var defaults: UserDefaults = .standard
 
+    @Published private(set) var mapRevision: UInt64 = 0
     private var cancellable: AnyCancellable?
+
+    // Emit after engine and persistence agree, including switches to an unmapped output.
+    let outputPresetChanges = PassthroughSubject<DevicePresetRecord?, Never>()
 
     private init() {}
 
     /// Стежити за зміною пристрою виводу. Викликається один раз з AppStartup.
     func bind() {
+        // Restore the current output at startup too; Start Clean explicitly skips it.
+        let skipInitialOutput = Self.defaults.string(forKey: "eqStartupMode") == EQStartupMode.startClean.rawValue
         cancellable = AudioRouter.shared.$selectedOutputDevice
             .compactMap(\.?.uid)
             .removeDuplicates()
-            .dropFirst()
+            .dropFirst(skipInitialOutput ? 1 : 0)
             .receive(on: RunLoop.main)
             .sink { [weak self] uid in
                 self?.outputChanged(to: uid)
@@ -53,8 +66,24 @@ final class DevicePresetManager {
     func recordApply(_ record: DevicePresetRecord, outputUID: String? = nil) {
         guard let uid = outputUID ?? AudioRouter.shared.selectedOutputDevice?.uid else { return }
         var map = loadMap()
-        map[uid] = record
+        var namedRecord = record
+        if namedRecord.outputName == nil, AudioRouter.shared.selectedOutputDevice?.uid == uid {
+            namedRecord.outputName = AudioRouter.shared.selectedOutputDevice?.name
+        }
+        map[uid] = namedRecord
         saveMap(map)
+    }
+
+    /// Removing a preset must also prevent it from returning on device switching.
+    func removePreset(outputUID: String? = nil) {
+        guard let uid = outputUID ?? AudioRouter.shared.selectedOutputDevice?.uid else { return }
+        var map = loadMap()
+        map.removeValue(forKey: uid)
+        saveMap(map)
+    }
+
+    func allRecords() -> [String: DevicePresetRecord] {
+        loadMap()
     }
 
     func record(for uid: String) -> DevicePresetRecord? {
@@ -96,6 +125,7 @@ final class DevicePresetManager {
             bassBoost: record.bassBoost
         )
         Self.defaults.set(record.descriptorJSON, forKey: "lastAppliedPresetJSON")
+        outputPresetChanges.send(record)
 
         dlog("Device preset applied for output \(uid)", level: .info, category: .preset)
     }
@@ -107,6 +137,7 @@ final class DevicePresetManager {
         engine.setPreampGain(0)
         PresetPersistence.save(mode: mode, gains: gains, preamp: 0, bassBoost: 0)
         Self.defaults.removeObject(forKey: "lastAppliedPresetJSON")
+        outputPresetChanges.send(nil)
         dlog("Flat EQ applied for unmapped output \(outputUID)", level: .info, category: .preset)
     }
 
@@ -122,6 +153,7 @@ final class DevicePresetManager {
     private func saveMap(_ map: [String: DevicePresetRecord]) {
         if let data = try? JSONEncoder().encode(map) {
             Self.defaults.set(data, forKey: Self.mapKey)
+            mapRevision &+= 1
         }
     }
 }

@@ -1,16 +1,20 @@
+// Async XCTest entry points avoid the isolated-deinit runtime crash.
+// https://github.com/swiftlang/swift/issues/87316
+// swiftformat:disable redundantAsync
+
 @testable import SystemEQ_for_Mac
 import XCTest
 
 @MainActor
 final class ProjectMAdaptiveFPSTests: XCTestCase {
-    func testFirstMeasurementIsWarmupOnly() {
+    func testFirstMeasurementIsWarmupOnly() async {
         var controller = ProjectMAdaptiveFPS()
 
         XCTAssertEqual(controller.observe(measuredFPS: 12, presetLocked: false, hasPresetPath: true), .warmup)
         XCTAssertEqual(controller.adaptiveScale, 1.0)
     }
 
-    func testLowFPSReducesScaleBeforeConsideringPresetSkip() {
+    func testLowFPSReducesScaleBeforeConsideringPresetSkip() async {
         var controller = ProjectMAdaptiveFPS()
         _ = controller.observe(measuredFPS: 60, presetLocked: false, hasPresetPath: true)
 
@@ -26,7 +30,7 @@ final class ProjectMAdaptiveFPSTests: XCTestCase {
         XCTAssertEqual(controller.adaptiveScale, 0.25)
     }
 
-    func testMinimumScaleSkipsUnlockedPresetAfterTwoLowFPSWindows() {
+    func testMinimumScaleSkipsUnlockedPresetAfterTwoLowFPSWindows() async {
         var controller = ProjectMAdaptiveFPS()
         _ = controller.observe(measuredFPS: 60, presetLocked: false, hasPresetPath: true)
 
@@ -38,7 +42,7 @@ final class ProjectMAdaptiveFPSTests: XCTestCase {
         XCTAssertEqual(controller.observe(measuredFPS: 20, presetLocked: false, hasPresetPath: true), .skipPreset)
     }
 
-    func testLockedPresetNeverSkipsAndHealthyWindowClearsLowFPSCount() {
+    func testLockedPresetNeverSkipsAndHealthyWindowClearsLowFPSCount() async {
         var controller = ProjectMAdaptiveFPS()
         _ = controller.observe(measuredFPS: 60, presetLocked: false, hasPresetPath: true)
 
@@ -53,7 +57,7 @@ final class ProjectMAdaptiveFPSTests: XCTestCase {
         XCTAssertEqual(controller.observe(measuredFPS: 20, presetLocked: false, hasPresetPath: true), .skipPreset)
     }
 
-    func testResetRestoresFullScaleAndWarmup() {
+    func testResetRestoresFullScaleAndWarmup() async {
         var controller = ProjectMAdaptiveFPS()
         _ = controller.observe(measuredFPS: 60, presetLocked: false, hasPresetPath: true)
         _ = controller.observe(measuredFPS: 20, presetLocked: false, hasPresetPath: true)

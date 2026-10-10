@@ -380,6 +380,8 @@ public final class AudioEngine: ObservableObject {
     }
 
     func resetAllBands() {
+        syncBandsToMode()
+        preampGain = 0
         for index in bands.indices {
             bands[index].gain = 0.0
         }

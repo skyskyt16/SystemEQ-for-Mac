@@ -3,6 +3,8 @@ import SwiftUI
 struct EQGraphView: View {
     let bands: [EQBand]
     let gainBinding: (Int) -> Binding<Float>
+    var onEditBegan: () -> Void = {}
+    var onEditEnded: () -> Void = {}
 
     private let hPad: CGFloat = 36
 
@@ -20,7 +22,8 @@ struct EQGraphView: View {
                 EQSlidersOverlay(
                     bands: bands,
                     hPad: hPad,
-                    gainBinding: gainBinding
+                    gainBinding: gainBinding,
+                    onEditBegan: onEditBegan, onEditEnded: onEditEnded
                 )
             }
         }
@@ -163,6 +166,8 @@ struct EQSlidersOverlay: View {
     let bands: [EQBand]
     let hPad: CGFloat
     let gainBinding: (Int) -> Binding<Float>
+    var onEditBegan: () -> Void = {}
+    var onEditEnded: () -> Void = {}
 
     var body: some View {
         GeometryReader { geo in
@@ -171,7 +176,8 @@ struct EQSlidersOverlay: View {
                     band: band,
                     size: geo.size,
                     hPad: hPad,
-                    gain: gainBinding(band.id)
+                    gain: gainBinding(band.id),
+                    onEditBegan: onEditBegan, onEditEnded: onEditEnded
                 )
             }
         }
@@ -183,6 +189,8 @@ struct EQBandHandle: View {
     let size: CGSize
     let hPad: CGFloat
     @Binding var gain: Float
+    var onEditBegan: () -> Void = {}
+    var onEditEnded: () -> Void = {}
     @State private var isDragging = false
     @State private var dragStartGain: Float = 0
 
@@ -239,14 +247,23 @@ struct EQBandHandle: View {
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
                             if !isDragging {
+                                onEditBegan()
                                 isDragging = true
                                 dragStartGain = gain
                             }
                             let delta = Float(-value.translation.height / size.height) * 40
                             gain = min(20, max(-20, dragStartGain + delta))
                         }
-                        .onEnded { _ in isDragging = false }
+                        .onEnded { _ in
+                            isDragging = false
+                            onEditEnded()
+                        }
                 )
+                .simultaneousGesture(TapGesture(count: 2).onEnded {
+                    onEditBegan()
+                    gain = 0
+                    onEditEnded()
+                })
         }
         .frame(width: size.width, height: size.height)
     }

@@ -1,3 +1,7 @@
+// Synchronous XCTest invocations can crash isolated deinit on older Swift runtimes.
+// Keep async entry points: https://github.com/swiftlang/swift/issues/87316
+// swiftformat:disable redundantAsync
+
 //
 //  BiquadFilterTests.swift
 //  SystemEQ for MacTests
@@ -8,10 +12,11 @@
 @testable import SystemEQ_for_Mac
 import XCTest
 
+@MainActor
 final class BiquadFilterTests: XCTestCase {
     // MARK: - Peak Filter Coefficient Tests
 
-    func testPeakFilterCoefficients_zeroGain_producesUnityFilter() {
+    func testPeakFilterCoefficients_zeroGain_producesUnityFilter() async {
         let filter = BiquadFilter()
         filter.configurePeak(frequency: 1000, gain: 0.0, q: 1.0, sampleRate: 48000)
 
@@ -28,7 +33,7 @@ final class BiquadFilterTests: XCTestCase {
         }
     }
 
-    func testPeakFilterCoefficients_positiveGain() {
+    func testPeakFilterCoefficients_positiveGain() async {
         let filter = BiquadFilter()
         filter.configurePeak(frequency: 1000, gain: 6.0, q: 1.0, sampleRate: 48000)
 
@@ -36,7 +41,7 @@ final class BiquadFilterTests: XCTestCase {
         XCTAssertGreaterThan(filter.b0, 1.0, "b0 should be > 1 for positive gain")
     }
 
-    func testPeakFilterCoefficients_negativeGain() {
+    func testPeakFilterCoefficients_negativeGain() async {
         let filter = BiquadFilter()
         filter.configurePeak(frequency: 1000, gain: -6.0, q: 1.0, sampleRate: 48000)
 
@@ -46,7 +51,7 @@ final class BiquadFilterTests: XCTestCase {
 
     // MARK: - Shelf Filter Tests
 
-    func testLowShelfFilterCoefficients_nonZero() {
+    func testLowShelfFilterCoefficients_nonZero() async {
         let filter = BiquadFilter()
         filter.configureLowShelf(frequency: 100, gain: 6.0, q: 0.7, sampleRate: 48000)
 
@@ -56,7 +61,7 @@ final class BiquadFilterTests: XCTestCase {
         XCTAssertNotEqual(filter.b0, 0.0, "b0 should not be zero")
     }
 
-    func testHighShelfFilterCoefficients_nonZero() {
+    func testHighShelfFilterCoefficients_nonZero() async {
         let filter = BiquadFilter()
         filter.configureHighShelf(frequency: 8000, gain: -3.0, q: 0.7, sampleRate: 48000)
 
@@ -67,7 +72,7 @@ final class BiquadFilterTests: XCTestCase {
 
     // MARK: - Signal Processing Tests
 
-    func testProcessBuffer_zeroGain_passthrough() {
+    func testProcessBuffer_zeroGain_passthrough() async {
         let filter = BiquadFilter()
         filter.configurePeak(frequency: 1000, gain: 0.0, q: 1.0, sampleRate: 48000)
 
@@ -91,7 +96,7 @@ final class BiquadFilterTests: XCTestCase {
         )
     }
 
-    func testProcessBuffer_bypass_leavesSignalUnchanged() {
+    func testProcessBuffer_bypass_leavesSignalUnchanged() async {
         let filter = BiquadFilter()
         filter.configurePeak(frequency: 1000, gain: 0.0, q: 1.0, sampleRate: 48000)
         filter.isBypass = true
@@ -116,7 +121,7 @@ final class BiquadFilterTests: XCTestCase {
         }
     }
 
-    func testImpulseResponse_peakFilter_hasDecay() {
+    func testImpulseResponse_peakFilter_hasDecay() async {
         let filter = BiquadFilter()
         filter.configurePeak(frequency: 1000, gain: 12.0, q: 2.0, sampleRate: 48000)
 
@@ -143,7 +148,7 @@ final class BiquadFilterTests: XCTestCase {
 
     // MARK: - Stereo Processing Tests
 
-    func testProcessStereoBuffers_matchesMono() {
+    func testProcessStereoBuffers_matchesMono() async {
         let filterMono = BiquadFilter()
         filterMono.configurePeak(frequency: 1000, gain: 6.0, q: 1.0, sampleRate: 48000)
 
@@ -179,7 +184,7 @@ final class BiquadFilterTests: XCTestCase {
         }
     }
 
-    func testOutputBoostRaisesQuietSignalAndLimitsStereoPeaks() {
+    func testOutputBoostRaisesQuietSignalAndLimitsStereoPeaks() async {
         let filter = BiquadFilterVDSP()
         filter.configure(bands: [], preamp: 0, outputBoost: 3, sampleRate: 48000)
 
@@ -219,7 +224,7 @@ final class BiquadFilterTests: XCTestCase {
         XCTAssertGreaterThan(-20 * log10(loudLimiterGain), 3)
     }
 
-    func testOutputBoostSupportsTwelveDBForQuietSignals() {
+    func testOutputBoostSupportsTwelveDBForQuietSignals() async {
         let filter = BiquadFilterVDSP()
         filter.configure(bands: [], preamp: 0, outputBoost: 12, sampleRate: 48000)
         var left = [Float](repeating: 0.1, count: 64)
@@ -239,7 +244,7 @@ final class BiquadFilterTests: XCTestCase {
         XCTAssertEqual(right[0], expected, accuracy: 0.0001)
     }
 
-    func testSafetyAtZeroBoostPreservesUnityAndLimitsPositivePreamp() {
+    func testSafetyAtZeroBoostPreservesUnityAndLimitsPositivePreamp() async {
         let passthrough = BiquadFilterVDSP()
         passthrough.configure(bands: [], preamp: 0, outputBoost: 0, sampleRate: 48000)
         var unityL = [Float](repeating: 1, count: 64)
@@ -278,7 +283,7 @@ final class BiquadFilterTests: XCTestCase {
 
     // MARK: - BiquadFilterChain Tests
 
-    func testFilterChain_preampApplied() {
+    func testFilterChain_preampApplied() async {
         let chain = BiquadFilterChain(filterCount: 1)
         chain.preamp = 6.0 // +6 dB ≈ 2x multiplier
 
@@ -313,7 +318,7 @@ final class BiquadFilterTests: XCTestCase {
         )
     }
 
-    func testFilterChain_multipleFilters_allApplied() {
+    func testFilterChain_multipleFilters_allApplied() async {
         let chain = BiquadFilterChain(filterCount: 3)
         chain.configureBands(
             [100, 1000, 10000],
@@ -331,7 +336,7 @@ final class BiquadFilterTests: XCTestCase {
         )
     }
 
-    func testFilterChain_zeroGainFilters_areBypassed() {
+    func testFilterChain_zeroGainFilters_areBypassed() async {
         let chain = BiquadFilterChain(filterCount: 3)
         chain.configureBands(
             [100, 1000, 10000],
@@ -351,7 +356,7 @@ final class BiquadFilterTests: XCTestCase {
 
     // MARK: - VDSP Filter Type Tests
 
-    func testVDSPCoefficients_allFilterTypesFiniteAndValid() {
+    func testVDSPCoefficients_allFilterTypesFiniteAndValid() async {
         let types: [FilterType] = [
             .peak,
             .lowShelf,
@@ -380,7 +385,7 @@ final class BiquadFilterTests: XCTestCase {
         }
     }
 
-    func testVDSPFilter_lowPassAndHighPass_retainedWhenZeroGain() {
+    func testVDSPFilter_lowPassAndHighPass_retainedWhenZeroGain() async {
         let filter = BiquadFilterVDSP(sampleRate: 48000)
         let bands = [
             ParametricBand(frequency: 100, gain: 0.0, q: 0.707, filterType: .highPass),
@@ -391,7 +396,7 @@ final class BiquadFilterTests: XCTestCase {
         XCTAssertEqual(filter.activeFilterCount, 2, "HighPass and LowPass should be active even with 0 gain")
     }
 
-    func testCoreAudioEngine_roomNotchFilters_preservesActiveEQ() {
+    func testCoreAudioEngine_roomNotchFilters_preservesActiveEQ() async {
         let engine = CoreAudioEngine.shared
         // Set a 10-band EQ
         engine.applyFixedBandEQ([3.0, 3.0, 0, 0, 0, 0, 0, 0, 0, 0], preamp: 0.0, outputBoost: 0.0)
@@ -409,7 +414,7 @@ final class BiquadFilterTests: XCTestCase {
         XCTAssertTrue(engine.vdspFilter === originalVDSP, "Original vdspFilter must still remain intact")
     }
 
-    func testBiquadFilterVDSP_recoversFromTransientNaN() {
+    func testBiquadFilterVDSP_recoversFromTransientNaN() async {
         let filter = BiquadFilterVDSP(sampleRate: 48000)
         let bands = [ParametricBand(frequency: 1000, gain: 6.0, q: 1.0, filterType: .peak)]
         filter.configure(bands: bands, preamp: 0.0, outputBoost: 0.0, sampleRate: 48000)
@@ -444,7 +449,7 @@ final class BiquadFilterTests: XCTestCase {
         XCTAssertGreaterThan(sumL, 0.01, "Filter delay lines must recover and not produce permanent silence")
     }
 
-    func testSPSCRingBuffer_resampler_boundarySafety() {
+    func testSPSCRingBuffer_resampler_boundarySafety() async {
         let rb = SPSCRingBuffer()
         rb.allocate(capacityFrames: 256)
 
@@ -467,7 +472,7 @@ final class BiquadFilterTests: XCTestCase {
         XCTAssertFalse(outR[0].isNaN)
     }
 
-    func testCoreAudioEngine_roomNotchFilters_rebuildsOnSampleRateChange() {
+    func testCoreAudioEngine_roomNotchFilters_rebuildsOnSampleRateChange() async {
         let engine = CoreAudioEngine.shared
         engine.applyRoomNotchFilters([(frequency: 250, gain: -6.0, q: 8.0)])
         guard let initialRoomFilter = engine.roomFilter else {

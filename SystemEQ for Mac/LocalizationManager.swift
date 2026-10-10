@@ -148,6 +148,21 @@ public enum LocalizedString: String, CaseIterable {
     case eqShort
     case bandMode
     case reset
+    case removeActivePreset
+    case undoEQ
+    case redoEQ
+    case compareEQ
+    case endComparison
+    case comparisonHelp
+    case deviceProfiles
+    case deviceProfilesHelp
+    case noDevicePreset
+    case disconnectedDevice
+    case removeDevicePreset
+    case factoryReset
+    case factoryResetDescription
+    case factoryResetConfirmation
+    case factoryResetFailed
     case autoPreamp
     case preamp
     case preampSafetyWarning
@@ -1280,6 +1295,81 @@ private enum LocalizationData {
                     .english: "Reset",
                     .italian: "Ripristina",
                     .ukrainian: "Скинути"
+                ],
+                .removeActivePreset: [
+                    .english: "Remove preset and reset EQ to 0 dB",
+                    .italian: "Rimuovi preset e azzera EQ a 0 dB",
+                    .ukrainian: "Видалити пресет і скинути EQ до 0 дБ"
+                ],
+                .undoEQ: [
+                    .english: "Undo EQ",
+                    .italian: "Annulla EQ",
+                    .ukrainian: "Скасувати EQ"
+                ],
+                .redoEQ: [
+                    .english: "Redo EQ",
+                    .italian: "Ripeti EQ",
+                    .ukrainian: "Повторити EQ"
+                ],
+                .compareEQ: [
+                    .english: "Compare A/B",
+                    .italian: "Confronta A/B",
+                    .ukrainian: "Порівняти A/B"
+                ],
+                .endComparison: [
+                    .english: "Keep Current",
+                    .italian: "Mantieni attuale",
+                    .ukrainian: "Залишити поточний"
+                ],
+                .comparisonHelp: [
+                    .english: "A and B start with the current EQ. Edit either slot, then switch to compare. Output Gain stays shared; preset preamps can change perceived loudness.",
+                    .italian: "A e B partono dall’EQ attuale. Modifica uno stato e alternali per confrontarli. Il guadagno di uscita è condiviso; i preamp possono cambiare il volume percepito.",
+                    .ukrainian: "A і B починаються з поточного EQ. Змініть будь-який стан і перемикайте для порівняння. Вихідне підсилення спільне; передпідсилення може впливати на гучність."
+                ],
+                .deviceProfiles: [
+                    .english: "Device Profiles",
+                    .italian: "Profili dispositivo",
+                    .ukrainian: "Профілі пристроїв"
+                ],
+                .deviceProfilesHelp: [
+                    .english: "Presets remembered for each output. Apply a preset in AutoEQ to assign it to the selected device.",
+                    .italian: "Preset memorizzati per ogni uscita. Applica un preset in AutoEQ per assegnarlo al dispositivo selezionato.",
+                    .ukrainian: "Пресети для кожного виходу. Застосуйте пресет в AutoEQ, щоб призначити його вибраному пристрою."
+                ],
+                .noDevicePreset: [
+                    .english: "No assigned preset",
+                    .italian: "Nessun preset assegnato",
+                    .ukrainian: "Немає призначеного пресета"
+                ],
+                .disconnectedDevice: [
+                    .english: "Disconnected output",
+                    .italian: "Uscita disconnessa",
+                    .ukrainian: "Від’єднаний вихід"
+                ],
+                .removeDevicePreset: [
+                    .english: "Remove assignment",
+                    .italian: "Rimuovi assegnazione",
+                    .ukrainian: "Видалити призначення"
+                ],
+                .factoryReset: [
+                    .english: "Factory Reset",
+                    .italian: "Ripristino di fabbrica",
+                    .ukrainian: "Заводське скидання"
+                ],
+                .factoryResetDescription: [
+                    .english: "Reset all settings and delete saved presets, favorites, device assignments and calibration profiles.",
+                    .italian: "Ripristina tutte le impostazioni ed elimina preset salvati, preferiti, associazioni ai dispositivi e profili di calibrazione.",
+                    .ukrainian: "Скинути всі налаштування та видалити збережені пресети, обране, прив’язки до пристроїв і профілі калібрування."
+                ],
+                .factoryResetConfirmation: [
+                    .english: "This cannot be undone. All settings, saved presets, favorites and calibration profiles will be deleted, and launch at login disabled. SystemEQ will quit. Open it again to start with factory defaults. The bundled AutoEQ library, imported source files and macOS permissions are preserved.",
+                    .italian: "Questa operazione è irreversibile. Tutte le impostazioni, i preset salvati, i preferiti e i profili di calibrazione saranno eliminati e l’avvio al login disattivato. SystemEQ si chiuderà. Riaprilo per usare le impostazioni di fabbrica. La libreria AutoEQ inclusa, i file sorgente importati e i permessi macOS saranno conservati.",
+                    .ukrainian: "Цю дію неможливо скасувати. Усі налаштування, збережені пресети, обране та профілі калібрування буде видалено, а запуск при вході вимкнено. SystemEQ закриється. Відкрийте його знову для запуску із заводськими налаштуваннями. Вбудована бібліотека AutoEQ, імпортовані вихідні файли та дозволи macOS збережуться."
+                ],
+                .factoryResetFailed: [
+                    .english: "Factory reset could not be completed",
+                    .italian: "Impossibile completare il ripristino di fabbrica",
+                    .ukrainian: "Не вдалося завершити заводське скидання"
                 ],
                 .autoPreamp: [
                     .english: "Normalize",

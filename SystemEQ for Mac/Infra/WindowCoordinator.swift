@@ -72,7 +72,8 @@ struct WindowAccessor: NSViewRepresentable {
         window.titleVisibility = .hidden
         window.styleMask.insert(.resizable)
         window.isMovable = true
-        window.isMovableByWindowBackground = true
+        // EQ gestures belong to the controls; keep dragging the window via its title bar.
+        window.isMovableByWindowBackground = id != "autoeq"
 
         // Enable fullscreen support - remove transient behavior
         window.collectionBehavior = [.fullScreenPrimary, .managed]

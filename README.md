@@ -258,6 +258,22 @@ brew upgrade --cask systemeq   # or: brew install --cask denzam/systemeq/systeme
 
 On Homebrew 5 and older the `trust` command does not exist — skip it.
 
+### Reset EQ or remove a preset
+
+In AutoEQ, **Reset** sets every band in the current 10- or 31-band mode and the
+preamp to **0 dB**, clears Bass Boost, and removes the active preset. The **×**
+beside the preset name does the same. The flat state survives a restart; the
+removed preset is also unassigned from the current output device. Favorites and
+presets assigned to other devices remain available. Output Boost and independent
+room correction are separate controls and are unchanged by this EQ reset.
+
+For a complete reset, open **Settings → Factory Reset** and confirm. This deletes
+all saved settings, preset favorites, device assignments, custom preset state,
+visualizer favorites, and calibration/hearing profiles, and disables launch at
+login. SystemEQ quits after restoring the physical audio output. Reopen it to
+start with factory defaults and onboarding. The bundled AutoEQ library, original
+imported files, installed BlackHole driver, and macOS permissions are preserved.
+
 ### The app asks for microphone access again after an update
 
 Expected. SystemEQ is ad-hoc signed, so its signature changes with every build
@@ -352,3 +368,21 @@ Also thanks to **Michel**, **Renato**, **David** and **Alberto** for their suppo
 ---
 
 **Made with ❤️ for the audio community**
+
+### EQ editing and A/B comparison
+
+In AutoEQ, **Undo EQ** (`⌘Z`) and **Redo EQ** (`⇧⌘Z`) restore band edits, Bass Boost,
+Output Gain, normalization, band-mode changes, preset imports and EQ reset/removal.
+A continuous band drag or slider adjustment is one step. History is kept in memory,
+limited to 60 steps, and cleared when the output device changes.
+
+**Compare A/B** copies the current EQ into two slots. Select B, change its EQ or load
+another preset, then switch between A and B. Each slot keeps its own edit history.
+Output Gain stays shared and is outside slot undo during comparison; preamp and EQ differences can still change perceived
+loudness. **Keep Current** ends the comparison using the selected slot. Switching
+outputs ends the comparison and restores the usual per-device Auto-Switch behavior.
+
+**Settings → Device Profiles** lists connected outputs and saved assignments for
+outputs that are disconnected. It shows the preset, band mode, preamp and Bass Boost.
+Apply a preset in AutoEQ to assign it to the selected output. Removing the active
+assignment with Auto-Switch enabled clears its EQ to 0 dB; other assignments remain.

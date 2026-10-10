@@ -7,6 +7,7 @@ struct SettingsView: View {
     @StateObject private var localization = LocalizationManager.shared
     @StateObject private var launchManager = LaunchAtLoginManager()
     @StateObject private var audioRouter = AudioRouter.shared
+    @ObservedObject private var devicePresets = DevicePresetManager.shared
     @StateObject private var appUpdateChecker = AppUpdateChecker()
     @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
     @AppStorage("hideDockIcon") private var hideDockIcon = false
@@ -14,6 +15,7 @@ struct SettingsView: View {
     @AppStorage("eqStartupMode") private var startupModeRaw: String = EQStartupMode.restoreLastState.rawValue
     @AppStorage(AudioRouter.backendPreferenceKey) private var audioBackendRaw =
         AudioRoutingBackendPreference.automatic.rawValue
+    @State private var showFactoryResetConfirmation = false
     @State private var isExportingDiagnostics = false
     @State private var diagnosticsExportMessage: String?
     @State private var diagnosticReportURL: URL?
@@ -43,10 +45,14 @@ struct SettingsView: View {
                 // General Section
                 generalSection
 
+                deviceProfilesSection
+
                 appUpdateSection
 
                 // EQ Database Section
                 databaseSection
+
+                factoryResetSection
 
                 diagnosticsSection
 
@@ -54,10 +60,108 @@ struct SettingsView: View {
                 linksSection
             }
         }
+        .alert(localization.localized(.factoryReset), isPresented: $showFactoryResetConfirmation) {
+            Button(localization.localized(.cancel), role: .cancel) {}
+            Button(localization.localized(.factoryReset), role: .destructive) {
+                FactoryReset.isRequested = true
+                // Let SwiftUI dismiss the confirmation before termination can show an error.
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+            }
+        } message: {
+            Text(localization.localized(.factoryResetConfirmation))
+        }
         .onAppear {
             dbStats = EQDatabase.shared.getDatabaseStats()
             dbVersion = EQDatabase.shared.getVersion()
         }
+    }
+
+    // MARK: - Device Profiles
+
+    private struct OutputProfile: Identifiable {
+        let id: String
+        let name: String
+        let connected: Bool
+        let record: DevicePresetRecord?
+    }
+
+    private var outputProfiles: [OutputProfile] {
+        let records = devicePresets.allRecords()
+        let devices = audioRouter.outputDevices.filter { !$0.name.lowercased().contains("blackhole") }
+        let known = Set(devices.map(\.uid))
+        var rows = devices.map { OutputProfile(id: $0.uid, name: $0.name, connected: true, record: records[$0.uid]) }
+        rows += records.filter { !known.contains($0.key) }.map {
+            OutputProfile(
+                id: $0.key,
+                name: $0.value.outputName ?? localization.localized(.disconnectedDevice),
+                connected: false,
+                record: $0.value
+            )
+        }
+        return rows.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private var deviceProfilesSection: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            Text(localization.localized(.deviceProfiles)).font(AppTypography.heading2)
+            Text(localization.localized(.deviceProfilesHelp))
+                .font(AppTypography.bodySmall).foregroundStyle(.secondary)
+            ForEach(outputProfiles) { profile in
+                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                    HStack {
+                        Text(profile.name).font(AppTypography.heading3)
+                        if profile.id == audioRouter.selectedOutputDevice?.uid {
+                            Text(localization.localized(.active)).foregroundStyle(.green)
+                        }
+                        Spacer()
+                        if profile.record != nil {
+                            Button(localization.localized(.removeDevicePreset)) {
+                                devicePresets.removePreset(outputUID: profile.id)
+                                if profile.id == audioRouter.selectedOutputDevice?.uid, autoSwitchPresetPerDevice {
+                                    devicePresets.outputChanged(to: profile.id, engine: .shared)
+                                }
+                            }.buttonStyle(.bordered)
+                        }
+                    }
+                    if !profile.connected {
+                        Text(localization.localized(.disconnectedDevice)).foregroundStyle(.secondary)
+                    }
+                    if let record = profile.record {
+                        Text(record.presetDisplayName ?? localization.localized(.noDevicePreset))
+                        Text(
+                            "\(record.mode) · \(localization.localized(.preamp)): \(String(format: "%+.1f dB", record.preamp)) · \(localization.localized(.autoEQBassBoost)): \(String(format: "%.1f dB", record.bassBoost))"
+                        )
+                        .font(AppTypography.bodySmall).foregroundStyle(.secondary)
+                    } else {
+                        Text(localization.localized(.noDevicePreset)).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(AppSpacing.sm)
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: AppRadius.md))
+            }
+        }
+        .padding(AppSpacing.xl)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    // MARK: - Factory Reset
+
+    private var factoryResetSection: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            Text(localization.localized(.factoryReset))
+                .font(AppTypography.heading2)
+            Text(localization.localized(.factoryResetDescription))
+                .font(AppTypography.bodySmall)
+                .foregroundStyle(.secondary)
+            Button(role: .destructive) {
+                showFactoryResetConfirmation = true
+            } label: {
+                Label(localization.localized(.factoryReset), systemImage: "arrow.counterclockwise")
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(AppSpacing.xl)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 
     // MARK: - Audio Backend Section
