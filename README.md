@@ -368,3 +368,21 @@ Also thanks to **Michel**, **Renato**, **David** and **Alberto** for their suppo
 ---
 
 **Made with ❤️ for the audio community**
+
+### EQ editing and A/B comparison
+
+In AutoEQ, **Undo EQ** (`⌘Z`) and **Redo EQ** (`⇧⌘Z`) restore band edits, Bass Boost,
+Output Gain, normalization, band-mode changes, preset imports and EQ reset/removal.
+A continuous band drag or slider adjustment is one step. History is kept in memory,
+limited to 60 steps, and cleared when the output device changes.
+
+**Compare A/B** copies the current EQ into two slots. Select B, change its EQ or load
+another preset, then switch between A and B. Each slot keeps its own edit history.
+Output Gain stays shared and is outside slot undo during comparison; preamp and EQ differences can still change perceived
+loudness. **Keep Current** ends the comparison using the selected slot. Switching
+outputs ends the comparison and restores the usual per-device Auto-Switch behavior.
+
+**Settings → Device Profiles** lists connected outputs and saved assignments for
+outputs that are disconnected. It shows the preset, band mode, preamp and Bass Boost.
+Apply a preset in AutoEQ to assign it to the selected output. Removing the active
+assignment with Auto-Switch enabled clears its EQ to 0 dB; other assignments remain.

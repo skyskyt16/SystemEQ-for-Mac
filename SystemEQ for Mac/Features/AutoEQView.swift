@@ -100,6 +100,10 @@ struct AutoEQView: View {
     @StateObject private var audioEngine = AudioEngine.shared
     @ObservedObject private var audioRouter = AudioRouter.shared
     @State private var isTogglingEQ = false
+    @StateObject private var editing = EQEditingSession<EditingSnapshot>()
+    @State private var pendingHistoryApply = false
+    @State private var historyImportPending = false
+    @State private var historyCompletionTask: Task<Void, Never>?
 
     // MARK: - Active Preset Tracking
 
@@ -129,6 +133,7 @@ struct AutoEQView: View {
     @State private var bandMode: BandMode = .ten
     @State private var mapped: [MappedBand] = []
     @State private var searchText: String = ""
+    @FocusState private var searchFocused: Bool
     @State private var isSearching: Bool = false
     @State private var candidates: [SearchCandidate] = []
     @State private var searchError: String?
@@ -260,6 +265,7 @@ struct AutoEQView: View {
                         .font(AppTypography.bodySmall)
                         .foregroundStyle(.secondary)
                 }
+                editingControls
                 activePresetSection
                 presetLibrarySection
 
@@ -305,7 +311,11 @@ struct AutoEQView: View {
         .onReceive(audioEngine.$bandMode) { restoredMode in
             syncBandModeFromAudioEngine(restoredMode)
         }
+        .onChange(of: audioRouter.selectedOutputDevice?.uid) { _ in
+            editing.reset()
+        }
         .onReceive(DevicePresetManager.shared.outputPresetChanges) { record in
+            editing.reset()
             restoreDevicePresetUI(record)
         }
         .onAppear {
@@ -421,6 +431,7 @@ struct AutoEQView: View {
 
             HStack(spacing: AppSpacing.sm) {
                 TextField(localization.localized(.searchHeadphonesModel), text: $searchText)
+                    .focused($searchFocused)
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: .infinity)
                     .disableAutocorrection(true)
@@ -560,13 +571,16 @@ struct AutoEQView: View {
 
             EQGraphView(
                 bands: mappedAsEQBands,
-                gainBinding: { id in mappedGainBinding(id: id) }
+                gainBinding: { id in mappedGainBinding(id: id) },
+                onEditBegan: beginEQEdit, onEditEnded: finishEQEdit
             )
             .frame(height: 300)
 
             HStack(spacing: AppSpacing.md) {
                 Button(localization.localized(.autoEQApplyToEQ)) {
+                    beginEQEdit()
                     applyToAudioEngine()
+                    finishEQEdit()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(mapped.isEmpty)
@@ -591,7 +605,8 @@ struct AutoEQView: View {
         autoEQPanel {
             EQGraphView(
                 bands: audioEngine.bands,
-                gainBinding: { id in manualBandGainBinding(id: id) }
+                gainBinding: { id in manualBandGainBinding(id: id) },
+                onEditBegan: beginEQEdit, onEditEnded: finishEQEdit
             )
             .frame(height: 300)
         }
@@ -677,7 +692,10 @@ struct AutoEQView: View {
                     .buttonStyle(.bordered)
 
                     Button {
+                        beginEQEdit()
                         withAnimation(.spring(response: 0.3)) { audioEngine.applyAutoPreamp() }
+                        preampDB = Double(audioEngine.preampGain)
+                        finishEQEdit()
                     } label: {
                         Label(localization.localized(.autoPreamp), systemImage: "wand.and.stars")
                     }
@@ -713,7 +731,12 @@ struct AutoEQView: View {
                             set: { audioEngine.setOutputBoostGain(Float($0)) }
                         ),
                         in: 0...Double(OutputSafetyProcessor.maximumBoostDB),
-                        step: 0.5
+                        step: 0.5,
+                        onEditingChanged: { editing in
+                            if self.editing.comparisonSlot == nil {
+                                if editing { beginEQEdit() } else { finishEQEdit() }
+                            }
+                        }
                     )
                     Text(audioEngine.formatGain(audioEngine.outputBoostGain))
                         .font(AppTypography.mono)
@@ -748,6 +771,7 @@ struct AutoEQView: View {
                 Slider(value: Binding(
                     get: { bassBoost },
                     set: { value in
+                        pendingHistoryApply = true
                         bassBoost = value
                         let generation = presetGeneration
                         applyEQDebounceTask?.cancel()
@@ -761,7 +785,9 @@ struct AutoEQView: View {
                             }
                         }
                     }
-                ), in: 0...6, step: 0.5)
+                ), in: 0...6, step: 0.5, onEditingChanged: { editing in
+                    if editing { beginEQEdit() } else { finishEQEdit() }
+                })
             }
         }
     }
@@ -850,6 +876,7 @@ struct AutoEQView: View {
 
     private func selectBandMode(_ newMode: BandMode) {
         guard newMode != bandMode else { return }
+        beginEQEdit()
         bandMode = newMode
         if audioEngine.bandMode != newMode.audioEngineMode {
             audioEngine.bandMode = newMode.audioEngineMode
@@ -880,6 +907,7 @@ struct AutoEQView: View {
                 preampDB = Double(record.preamp)
             }
             guard shouldApply else { return }
+            pendingHistoryApply = audioEngine.isEnabled
             applyEQDebounceTask?.cancel()
             applyEQDebounceTask = Task {
                 try? await Task.sleep(nanoseconds: 100_000_000)
@@ -887,7 +915,10 @@ struct AutoEQView: View {
                 await MainActor.run {
                     if !mapped.isEmpty, audioEngine.isEnabled {
                         applyToAudioEngine()
+                    } else {
+                        pendingHistoryApply = false
                     }
+                    finishEQEdit()
                 }
             }
         }
@@ -1306,6 +1337,7 @@ struct AutoEQView: View {
     }
 
     private func scheduleLiveApply() {
+        pendingHistoryApply = true
         applyEQDebounceTask?.cancel()
         applyEQDebounceTask = Task {
             try? await Task.sleep(nanoseconds: 30_000_000)
@@ -1438,13 +1470,19 @@ struct AutoEQView: View {
     @MainActor
     private func importCandidate(_ c: SearchCandidate, restoringUI: Bool = false) async {
         if !restoringUI {
+            beginEQEdit()
+            historyImportPending = true
+            pendingHistoryApply = audioEngine.isEnabled
             restoredDevicePreset = nil
             suppressNextAutoApply = false
             presetGeneration &+= 1
         }
         let generation = presetGeneration
         isSearching = true
-        defer { isSearching = false }
+        defer {
+            isSearching = false
+            if !restoringUI { finishImportHistory(after: generation) }
+        }
         searchError = nil
 
         // ✅ Check cache first - prevents re-importing and getting different values
@@ -1713,6 +1751,9 @@ struct AutoEQView: View {
     @discardableResult
     private func applyCustomPreset(text: String, name: String, persist: Bool, autoApply: Bool) -> Bool {
         if autoApply {
+            beginEQEdit()
+            historyImportPending = true
+            pendingHistoryApply = audioEngine.isEnabled
             restoredDevicePreset = nil
             suppressNextAutoApply = false
             presetGeneration &+= 1
@@ -1747,6 +1788,7 @@ struct AutoEQView: View {
 
         guard !bands.isEmpty else {
             searchError = localization.localized(.autoEQImportFileError)
+            if autoApply { finishEQEdit() }
             return false
         }
 
@@ -1770,6 +1812,7 @@ struct AutoEQView: View {
         }
 
         if autoApply {
+            finishImportHistory(after: presetGeneration)
             applyEQDebounceTask?.cancel()
             applyEQDebounceTask = Task {
                 try? await Task.sleep(nanoseconds: 100_000_000)
@@ -2018,6 +2061,7 @@ struct AutoEQView: View {
     // MARK: - Apply to AudioEngine
 
     private func applyToAudioEngine(allowFlat: Bool = false) {
+        pendingHistoryApply = false
         guard !mapped.isEmpty, allowFlat || !parsed.isEmpty else {
             dlog("⚠️ No mapped bands to apply", category: .network)
             return
@@ -2074,9 +2118,201 @@ struct AutoEQView: View {
         }
     }
 
+    // MARK: - Editing History and A/B Comparison
+
+    private struct EditingSnapshot: Equatable {
+        let outputUID: String?
+        let mode: EQBandMode
+        let gains: [Float]
+        let preamp: Float
+        let outputBoost: Float
+        let bassBoost: Double
+        let parsed: [ParsedBand]
+        let parsed10: [ParsedBand]
+        let parsed31: [ParsedBand]
+        let mappedGains: [Double]
+        let preampDB: Double?
+        let preamp10: Double?
+        let preamp31: Double?
+        let name: String?
+        let source: String?
+        let target: String?
+        let path: String?
+        let rawText: String
+        let descriptor: String
+        let customText: String
+        let customName: String
+        let deviceRecord: DevicePresetRecord?
+        let savedPreset: DevicePresetRecord?
+    }
+
+    private var editingControls: some View {
+        autoEQPanel {
+            HStack(spacing: AppSpacing.md) {
+                Button { undoEQEdit() } label: {
+                    Label(localization.localized(.undoEQ), systemImage: "arrow.uturn.backward")
+                }
+                .disabled(!editing.canUndo)
+                .keyboardShortcut("z", modifiers: .command)
+                Button { redoEQEdit() } label: {
+                    Label(localization.localized(.redoEQ), systemImage: "arrow.uturn.forward")
+                }
+                .disabled(!editing.canRedo)
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                Spacer()
+                if let slot = editing.comparisonSlot {
+                    Picker(localization.localized(.compareEQ), selection: Binding(
+                        get: { slot },
+                        set: { selected in
+                            finishEQEdit()
+                            if let state = editing.select(selected, current: editingSnapshot()) {
+                                restoreEditingSnapshot(state, preserveOutputBoost: true)
+                            }
+                        }
+                    )) {
+                        ForEach(EQEditingSession<EditingSnapshot>.Slot.allCases, id: \.self) { value in
+                            Text(value.rawValue).tag(value)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 120)
+                    Button(localization.localized(.endComparison)) { editing.endComparison() }
+                } else {
+                    Button(localization.localized(.compareEQ)) {
+                        finishEQEdit()
+                        editing.startComparison(editingSnapshot())
+                    }
+                }
+            }
+            if editing.comparisonSlot != nil {
+                Text(localization.localized(.comparisonHelp))
+                    .font(AppTypography.bodySmall)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func editingSnapshot() -> EditingSnapshot {
+        let uid = audioRouter.selectedOutputDevice?.uid
+        let saved = PresetPersistence.load().map {
+            DevicePresetRecord(
+                mode: $0.mode.rawValue,
+                appliedGains: audioEngine.bands.map(\.gain),
+                cleanGains: $0.gains,
+                preamp: $0.preamp,
+                bassBoost: $0.bassBoost,
+                descriptorJSON: lastAppliedPresetJSON
+            )
+        }
+        return EditingSnapshot(
+            outputUID: uid, mode: audioEngine.bandMode, gains: audioEngine.bands.map(\.gain),
+            preamp: audioEngine.preampGain, outputBoost: audioEngine.outputBoostGain,
+            bassBoost: bassBoost, parsed: parsed, parsed10: parsed10, parsed31: parsed31,
+            mappedGains: mapped.map(\.gain), preampDB: preampDB, preamp10: preampDB10, preamp31: preampDB31,
+            name: activePresetName, source: activePresetSource, target: activePresetTarget,
+            path: activePresetPath, rawText: rawText, descriptor: lastAppliedPresetJSON,
+            customText: lastCustomPresetText, customName: lastCustomPresetName,
+            deviceRecord: uid.flatMap { DevicePresetManager.shared.record(for: $0) }, savedPreset: saved
+        )
+    }
+
+    private func beginEQEdit() {
+        searchFocused = false
+        if historyImportPending { finishEQEdit() }
+        editing.begin(editingSnapshot())
+    }
+
+    private func finishEQEdit() {
+        if pendingHistoryApply {
+            applyEQDebounceTask?.cancel()
+            applyEQDebounceTask = nil
+            applyToAudioEngine(allowFlat: true)
+        }
+        historyImportPending = false
+        editing.finish(editingSnapshot())
+    }
+
+    private func finishImportHistory(after generation: UInt64) {
+        guard generation == presetGeneration else { return }
+        historyCompletionTask?.cancel()
+        historyCompletionTask = Task {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard !Task.isCancelled, generation == presetGeneration, historyImportPending else { return }
+            finishEQEdit()
+        }
+    }
+
+    private func undoEQEdit() {
+        finishEQEdit()
+        if let previous = editing.undo(editingSnapshot()) { restoreEditingSnapshot(
+            previous,
+            preserveOutputBoost: editing.comparisonSlot != nil
+        ) }
+    }
+
+    private func redoEQEdit() {
+        finishEQEdit()
+        if let next = editing.redo(editingSnapshot()) { restoreEditingSnapshot(
+            next,
+            preserveOutputBoost: editing.comparisonSlot != nil
+        ) }
+    }
+
+    private func restoreEditingSnapshot(_ state: EditingSnapshot, preserveOutputBoost: Bool = false) {
+        guard state.outputUID == audioRouter.selectedOutputDevice?.uid else { editing.reset(); return }
+        clearPresetUI()
+        audioEngine.bandMode = state.mode
+        audioEngine.applyEQValues(state.gains)
+        audioEngine.setPreampGain(state.preamp)
+        if !preserveOutputBoost { audioEngine.setOutputBoostGain(state.outputBoost) }
+        bandMode = BandMode(audioEngineMode: state.mode)
+        parsed = state.parsed
+        parsed10 = state.parsed10
+        parsed31 = state.parsed31
+        let centers = state.mode.frequencies.map(Double.init)
+        mapped = zip(centers, state.mappedGains).map { MappedBand(center: $0, gain: $1) }
+        bassBoost = state.bassBoost
+        preampDB = state.preampDB
+        preampDB10 = state.preamp10
+        preampDB31 = state.preamp31
+        activePresetName = state.name
+        activePresetSource = state.source
+        activePresetTarget = state.target
+        activePresetPath = state.path
+        rawText = state.rawText
+        lastAppliedPresetJSON = state.descriptor
+        lastCustomPresetText = state.customText
+        lastCustomPresetName = state.customName
+        suppressNextAutoApply = true
+        if !state.parsed.isEmpty {
+            restoredDevicePreset = DevicePresetRecord(
+                mode: state.mode.rawValue, appliedGains: state.gains,
+                cleanGains: state.mappedGains.map(Float.init), preamp: state.preamp,
+                bassBoost: Float(state.bassBoost), descriptorJSON: state.descriptor
+            )
+        }
+        if let saved = state.savedPreset {
+            PresetPersistence.save(
+                mode: state.mode,
+                gains: saved.cleanGains,
+                preamp: saved.preamp,
+                bassBoost: saved.bassBoost
+            )
+        } else { PresetPersistence.clear() }
+        PresetPersistence.savePlaybackState(mode: state.mode, gains: state.gains, preamp: state.preamp)
+        if let uid = state.outputUID {
+            if let record = state.deviceRecord {
+                DevicePresetManager.shared.recordApply(record, outputUID: uid)
+            } else { DevicePresetManager.shared.removePreset(outputUID: uid) }
+        }
+    }
+
     // MARK: - Reset
 
     private func clearPresetUI() {
+        historyCompletionTask?.cancel()
+        historyImportPending = false
+        pendingHistoryApply = false
         restoredDevicePreset = nil
         presetGeneration &+= 1
         applyEQDebounceTask?.cancel()
@@ -2100,6 +2336,7 @@ struct AutoEQView: View {
     }
 
     private func removeActivePreset() {
+        beginEQEdit()
         clearPresetUI()
         lastAppliedPresetJSON = ""
         lastCustomPresetText = ""
@@ -2107,6 +2344,7 @@ struct AutoEQView: View {
         PresetPersistence.clear()
         DevicePresetManager.shared.removePreset()
         audioEngine.resetAllBands()
+        finishEQEdit()
     }
 
     /// A device switch restores the saved values, not the original preset defaults.

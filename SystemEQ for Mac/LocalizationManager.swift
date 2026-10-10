@@ -149,6 +149,16 @@ public enum LocalizedString: String, CaseIterable {
     case bandMode
     case reset
     case removeActivePreset
+    case undoEQ
+    case redoEQ
+    case compareEQ
+    case endComparison
+    case comparisonHelp
+    case deviceProfiles
+    case deviceProfilesHelp
+    case noDevicePreset
+    case disconnectedDevice
+    case removeDevicePreset
     case factoryReset
     case factoryResetDescription
     case factoryResetConfirmation
@@ -1290,6 +1300,56 @@ private enum LocalizationData {
                     .english: "Remove preset and reset EQ to 0 dB",
                     .italian: "Rimuovi preset e azzera EQ a 0 dB",
                     .ukrainian: "Видалити пресет і скинути EQ до 0 дБ"
+                ],
+                .undoEQ: [
+                    .english: "Undo EQ",
+                    .italian: "Annulla EQ",
+                    .ukrainian: "Скасувати EQ"
+                ],
+                .redoEQ: [
+                    .english: "Redo EQ",
+                    .italian: "Ripeti EQ",
+                    .ukrainian: "Повторити EQ"
+                ],
+                .compareEQ: [
+                    .english: "Compare A/B",
+                    .italian: "Confronta A/B",
+                    .ukrainian: "Порівняти A/B"
+                ],
+                .endComparison: [
+                    .english: "Keep Current",
+                    .italian: "Mantieni attuale",
+                    .ukrainian: "Залишити поточний"
+                ],
+                .comparisonHelp: [
+                    .english: "A and B start with the current EQ. Edit either slot, then switch to compare. Output Gain stays shared; preset preamps can change perceived loudness.",
+                    .italian: "A e B partono dall’EQ attuale. Modifica uno stato e alternali per confrontarli. Il guadagno di uscita è condiviso; i preamp possono cambiare il volume percepito.",
+                    .ukrainian: "A і B починаються з поточного EQ. Змініть будь-який стан і перемикайте для порівняння. Вихідне підсилення спільне; передпідсилення може впливати на гучність."
+                ],
+                .deviceProfiles: [
+                    .english: "Device Profiles",
+                    .italian: "Profili dispositivo",
+                    .ukrainian: "Профілі пристроїв"
+                ],
+                .deviceProfilesHelp: [
+                    .english: "Presets remembered for each output. Apply a preset in AutoEQ to assign it to the selected device.",
+                    .italian: "Preset memorizzati per ogni uscita. Applica un preset in AutoEQ per assegnarlo al dispositivo selezionato.",
+                    .ukrainian: "Пресети для кожного виходу. Застосуйте пресет в AutoEQ, щоб призначити його вибраному пристрою."
+                ],
+                .noDevicePreset: [
+                    .english: "No assigned preset",
+                    .italian: "Nessun preset assegnato",
+                    .ukrainian: "Немає призначеного пресета"
+                ],
+                .disconnectedDevice: [
+                    .english: "Disconnected output",
+                    .italian: "Uscita disconnessa",
+                    .ukrainian: "Від’єднаний вихід"
+                ],
+                .removeDevicePreset: [
+                    .english: "Remove assignment",
+                    .italian: "Rimuovi assegnazione",
+                    .ukrainian: "Видалити призначення"
                 ],
                 .factoryReset: [
                     .english: "Factory Reset",

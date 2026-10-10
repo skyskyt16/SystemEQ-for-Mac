@@ -17,11 +17,18 @@ struct DevicePresetRecord: Codable, Equatable {
     let cleanGains: [Float] // без boost — для PresetPersistence
     let preamp: Float
     let bassBoost: Float
+    var outputName: String? = nil
     let descriptorJSON: String // дескриптор пресета для UI AutoEQ
+
+    var presetDisplayName: String? {
+        struct Name: Decodable { let name: String? }
+        guard let data = descriptorJSON.data(using: .utf8) else { return nil }
+        return (try? JSONDecoder().decode(Name.self, from: data))?.name
+    }
 }
 
 @MainActor
-final class DevicePresetManager {
+final class DevicePresetManager: ObservableObject {
     static let shared = DevicePresetManager()
 
     static let autoSwitchKey = "autoSwitchPresetPerDevice"
@@ -30,6 +37,7 @@ final class DevicePresetManager {
     // 🔧 Тести підміняють на ізольований suite — як у PresetPersistence
     nonisolated(unsafe) static var defaults: UserDefaults = .standard
 
+    @Published private(set) var mapRevision: UInt64 = 0
     private var cancellable: AnyCancellable?
 
     // Emit after engine and persistence agree, including switches to an unmapped output.
@@ -58,7 +66,11 @@ final class DevicePresetManager {
     func recordApply(_ record: DevicePresetRecord, outputUID: String? = nil) {
         guard let uid = outputUID ?? AudioRouter.shared.selectedOutputDevice?.uid else { return }
         var map = loadMap()
-        map[uid] = record
+        var namedRecord = record
+        if namedRecord.outputName == nil, AudioRouter.shared.selectedOutputDevice?.uid == uid {
+            namedRecord.outputName = AudioRouter.shared.selectedOutputDevice?.name
+        }
+        map[uid] = namedRecord
         saveMap(map)
     }
 
@@ -68,6 +80,10 @@ final class DevicePresetManager {
         var map = loadMap()
         map.removeValue(forKey: uid)
         saveMap(map)
+    }
+
+    func allRecords() -> [String: DevicePresetRecord] {
+        loadMap()
     }
 
     func record(for uid: String) -> DevicePresetRecord? {
@@ -137,6 +153,7 @@ final class DevicePresetManager {
     private func saveMap(_ map: [String: DevicePresetRecord]) {
         if let data = try? JSONEncoder().encode(map) {
             Self.defaults.set(data, forKey: Self.mapKey)
+            mapRevision &+= 1
         }
     }
 }

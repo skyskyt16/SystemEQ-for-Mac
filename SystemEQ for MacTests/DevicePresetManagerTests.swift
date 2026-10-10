@@ -249,4 +249,16 @@ final class DevicePresetManagerTests: XCTestCase {
 
         XCTAssertFalse(received)
     }
+    func testLegacyDeviceRecordWithoutNameStillDecodesAndAppearsInOverview() async throws {
+        let record = makeRecord(name: "legacy")
+        let encoded = try JSONEncoder().encode(record)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "outputName")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(DevicePresetRecord.self, from: legacy)
+        XCTAssertNil(decoded.outputName)
+        XCTAssertEqual(decoded.presetDisplayName, "legacy")
+        DevicePresetManager.shared.recordApply(decoded, outputUID: "legacy-output")
+        XCTAssertEqual(DevicePresetManager.shared.allRecords()["legacy-output"], decoded)
+    }
 }
