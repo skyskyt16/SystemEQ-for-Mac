@@ -46,6 +46,8 @@ public final class CoreAudioEngine: ObservableObject {
     fileprivate var inputUnit: AudioUnit?
     fileprivate var outputUnit: AudioUnit?
     private var isSetupComplete = false
+    nonisolated let inputHealth = AudioCallbackHealth()
+    nonisolated let outputHealth = AudioCallbackHealth()
     private var inputDeviceID: AudioDeviceID = 0
     private var outputDeviceID: AudioDeviceID = 0
 
@@ -319,6 +321,8 @@ public final class CoreAudioEngine: ObservableObject {
     fileprivate let diagnosticTestToneOutputSeen = CoreAudioEngine.makeDiagnosticCounter()
     fileprivate let diagnosticTestToneDeviceBufferSeen = CoreAudioEngine.makeDiagnosticCounter()
     private var callbackWindow: AudioCallbackWindow?
+    private var configuredInputFormat: AudioStreamBasicDescription?
+    private var configuredOutputFormat: AudioStreamBasicDescription?
     fileprivate var lastOutSampleTimes: [Double] = []
     fileprivate var lastInSampleTimes: [Double] = []
 
@@ -401,6 +405,7 @@ public final class CoreAudioEngine: ObservableObject {
         let status = withUnsafeMutablePointer(to: &uid) { pointer in
             AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, pointer)
         }
+        logControlStatus(status, operation: "readDeviceUID")
         guard status == noErr, let uid else { return nil }
         return uid.takeRetainedValue() as String
     }
@@ -412,26 +417,21 @@ public final class CoreAudioEngine: ObservableObject {
             mElement: kAudioObjectPropertyElementMain
         )
         var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            0,
-            nil,
-            &size
-        ) == noErr else { return nil }
+        let sizeStatus = AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size
+        )
+        logControlStatus(sizeStatus, operation: "readDeviceListSize")
+        guard sizeStatus == noErr else { return nil }
 
         var deviceIDs = [AudioDeviceID](
             repeating: 0,
             count: Int(size) / MemoryLayout<AudioDeviceID>.size
         )
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            0,
-            nil,
-            &size,
-            &deviceIDs
-        ) == noErr else { return nil }
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceIDs
+        )
+        logControlStatus(status, operation: "readDeviceList")
+        guard status == noErr else { return nil }
         return deviceIDs.first { getDeviceUID($0) == uid }
     }
 
@@ -477,7 +477,9 @@ public final class CoreAudioEngine: ObservableObject {
         )
         var frames: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
-        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &frames) == noErr else { return nil }
+        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &frames)
+        logControlStatus(status, operation: "readBufferFrameSize")
+        guard status == noErr else { return nil }
         return frames
     }
 
@@ -512,6 +514,11 @@ public final class CoreAudioEngine: ObservableObject {
             dlog("⚠️ Failed to set device sample rate (\(deviceID)) to \(rate): \(status)", category: .engine)
             return false
         }
+        guard let observed = getDeviceSampleRate(deviceID), observed.isFinite,
+              abs(observed - rate) < 1 else {
+            recordSetupFailure("sampleRateWriteReadback")
+            return false
+        }
         dlog("✅ Set device (\(deviceID)) sample rate to \(rate)", category: .engine)
         return true
     }
@@ -527,13 +534,12 @@ public final class CoreAudioEngine: ObservableObject {
     }
 
     /// Restores every device we changed back to its captured nominal rate. Call
-    /// when EQ routing is disabled so devices aren't left permanently forced to 48k.
+    /// when EQ routing is disabled so virtual devices regain their original rate.
     /// Safe to call when the engine is stopped (no active stream to glitch).
     ///
     /// Main-thread only: `originalDeviceSampleRates` is an unsynchronized dictionary
     /// shared with `setup()`/`captureOriginalSampleRate`, which also run on main.
-    /// Limitation: a crash/force-quit skips this, leaving devices at 48k; the next
-    /// launch would then capture 48k as the "original". Acceptable — no persisted state.
+    /// Captured rates are persisted by device UID so a later launch can finish restoration.
     public func restoreDeviceSampleRates() {
         var restoredUIDs: [String] = []
         for (uid, rate) in originalDeviceSampleRates {
@@ -590,7 +596,8 @@ public final class CoreAudioEngine: ObservableObject {
         DiagnosticEventStore.shared.record("engine.setup.stepFailed", details: details)
     }
 
-    public func setup(inputDevice: AudioDeviceID, outputDevice: AudioDeviceID) {
+    @discardableResult
+    public func setup(inputDevice: AudioDeviceID, outputDevice: AudioDeviceID) -> Bool {
         DiagnosticEventStore.shared.record("engine.setup.request")
         dlog("🔧 Setting up Core Audio Engine...", category: .engine)
         dlog("   Input device: \(inputDevice)", category: .engine)
@@ -616,26 +623,29 @@ public final class CoreAudioEngine: ObservableObject {
         }
 
         // Remember each device's nominal rate the first time we touch it, so we can
-        // put it back when EQ is turned off (we force 48k below).
-        captureOriginalSampleRate(outputDevice)
+        // put it back when EQ is turned off.
         captureOriginalSampleRate(inputDevice)
 
-        // Align hardware sample rates (prefer 48k, fallback to 44.1k)
-        let preferred = 48000.0
-        _ = setDeviceSampleRate(outputDevice, rate: preferred)
-        _ = setDeviceSampleRate(inputDevice, rate: preferred)
-        let inRate = getDeviceSampleRate(inputDevice) ?? preferred
-        let outRate = getDeviceSampleRate(outputDevice) ?? preferred
-        dlog("📊 Initial sample rates: input=\(inRate)Hz, output=\(outRate)Hz", category: .engine)
-
-        if abs(inRate - outRate) >= 1.0 {
-            dlog("⚠️ Sample rate mismatch detected! Attempting to align...", category: .engine)
-            if !setDeviceSampleRate(outputDevice, rate: inRate) {
-                _ = setDeviceSampleRate(inputDevice, rate: outRate)
-            }
+        // Preserve the physical device's selected rate; align the virtual input to it.
+        guard let preferred = getDeviceSampleRate(outputDevice), preferred.isFinite, preferred > 0 else {
+            recordSetupFailure("outputSampleRate")
+            return false
         }
-        let finalInRate = getDeviceSampleRate(inputDevice) ?? preferred
-        let finalOutRate = getDeviceSampleRate(outputDevice) ?? preferred
+        guard let inputRate = getDeviceSampleRate(inputDevice), inputRate.isFinite, inputRate > 0 else {
+            recordSetupFailure("inputSampleRate")
+            return false
+        }
+        if abs(inputRate - preferred) >= 1, !setDeviceSampleRate(inputDevice, rate: preferred) {
+            recordSetupFailure("inputSampleRateAlignment")
+            return false
+        }
+        guard let finalInRate = getDeviceSampleRate(inputDevice), finalInRate.isFinite, finalInRate > 0,
+              let finalOutRate = getDeviceSampleRate(outputDevice), finalOutRate.isFinite, finalOutRate > 0,
+              abs(finalInRate - finalOutRate) < 1 else {
+            // AUHAL input does not convert sample rates. Never silently change the physical output to match.
+            recordSetupFailure("deviceSampleRateReadback")
+            return false
+        }
         self.currentSampleRate = finalOutRate
         rebuildRoomFilter(sampleRate: finalOutRate)
         DiagnosticEventStore.shared.record(
@@ -674,13 +684,6 @@ public final class CoreAudioEngine: ObservableObject {
         logDeviceBufferInfo(inputDevice, label: "INPUT")
         logDeviceBufferInfo(outputDevice, label: "OUTPUT")
 
-        if abs(finalInRate - finalOutRate) >= 1.0 {
-            DiagnosticEventStore.shared.record("engine.setup.rateMismatch")
-            dlog("⚠️ WARNING: Sample rate mismatch! This will cause audio quality degradation!", category: .engine)
-            dlog("   Input: \(finalInRate)Hz, Output: \(finalOutRate)Hz", category: .engine)
-            dlog("   Please set both devices to the same sample rate in Audio MIDI Setup", category: .engine)
-        }
-
         // Desired client format (Float32, non-interleaved, up to 2ch)
         let targetSampleRate: Double = self.currentSampleRate
         var clientFormat = AudioStreamBasicDescription(
@@ -694,9 +697,9 @@ public final class CoreAudioEngine: ObservableObject {
             mBitsPerChannel: 32,
             mReserved: 0
         )
-        let asbdSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         var maxFramesPerSlice: UInt32 = 4096
         let mfsSize = UInt32(MemoryLayout<UInt32>.size)
+        var expectedOutputFormat = clientFormat
 
         // MARK: Create INPUT unit (HAL, attached to virtual audio device)
 
@@ -711,14 +714,14 @@ public final class CoreAudioEngine: ObservableObject {
             guard let comp = AudioComponentFindNext(nil, &desc) else {
                 recordSetupFailure("inputComponent")
                 dlog("❌ Failed to find HAL Output Audio Component (input)", category: .engine)
-                return
+                return false
             }
             var unit: AudioUnit?
             var status = AudioComponentInstanceNew(comp, &unit)
             guard status == noErr, let iu = unit else {
                 recordSetupFailure("inputUnitCreate", status: status)
                 dlog("❌ Failed to create INPUT unit: \(status)", category: .engine)
-                return
+                return false
             }
             inputUnit = iu
 
@@ -737,7 +740,7 @@ public final class CoreAudioEngine: ObservableObject {
             if status != noErr {
                 recordSetupFailure("inputEnable", status: status)
                 dlog("❌ Failed to enable INPUT on inputUnit: \(status)", category: .engine)
-                return
+                return false
             }
             status = AudioUnitSetProperty(
                 iu,
@@ -750,7 +753,7 @@ public final class CoreAudioEngine: ObservableObject {
             if status != noErr {
                 recordSetupFailure("inputDisableOutput", status: status)
                 dlog("❌ Failed to disable OUTPUT on inputUnit: \(status)", category: .engine)
-                return
+                return false
             }
 
             // Attach to virtual audio input device
@@ -766,7 +769,7 @@ public final class CoreAudioEngine: ObservableObject {
             if status != noErr {
                 recordSetupFailure("inputDevice", status: status)
                 dlog("❌ Failed to set INPUT device: \(status)", category: .engine)
-                return
+                return false
             }
 
             // Query actual input format to derive channel count
@@ -789,58 +792,28 @@ public final class CoreAudioEngine: ObservableObject {
                 )
                 self.channelCount = max(1, min(2, inFormat.mChannelsPerFrame))
             } else {
-                self.channelCount = 2
+                recordSetupFailure("inputHardwareFormat", status: status)
+                return false
+            }
+            guard inFormat.mChannelsPerFrame > 0 else {
+                recordSetupFailure("inputHardwareChannels")
+                return false
             }
             clientFormat.mChannelsPerFrame = self.channelCount
 
             dlog(
-                "🎯 Forcing client sample rate: \(targetSampleRate)Hz (set devices to 48k in Audio MIDI Setup)",
+                "🎯 Configuring client sample rate: \(targetSampleRate)Hz",
                 category: .engine
             )
 
             // Configure client stream format on INPUT unit's output (element 1)
-            _ = AudioUnitSetProperty(
-                iu,
-                kAudioUnitProperty_StreamFormat,
-                kAudioUnitScope_Output,
-                1,
-                &clientFormat,
-                asbdSize
-            )
-            var sr = self.currentSampleRate
-            _ = AudioUnitSetProperty(
-                iu,
-                kAudioUnitProperty_SampleRate,
-                kAudioUnitScope_Output,
-                1,
-                &sr,
-                UInt32(MemoryLayout<Double>.size)
-            )
-            _ = AudioUnitSetProperty(
-                iu,
-                kAudioUnitProperty_MaximumFramesPerSlice,
-                kAudioUnitScope_Global,
-                0,
-                &maxFramesPerSlice,
-                mfsSize
-            )
-            // Log INPUT client format (what AudioUnitRender will produce)
-            var clientFmtCheck = AudioStreamBasicDescription()
-            var cfSz = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-            if AudioUnitGetProperty(
-                iu,
-                kAudioUnitProperty_StreamFormat,
-                kAudioUnitScope_Output,
-                1,
-                &clientFmtCheck,
-                &cfSz
-            ) == noErr {
-                let interleaved = (clientFmtCheck.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
-                dlog(
-                    "📊 INPUT client format: \(clientFmtCheck.mChannelsPerFrame)ch, \(clientFmtCheck.mSampleRate)Hz, interleaved=\(interleaved)",
-                    category: .engine
-                )
+            guard configureClientFormat(iu, scope: kAudioUnitScope_Output, element: 1, expected: &clientFormat) else {
+                return false
             }
+            logControlStatus(AudioUnitSetProperty(
+                iu, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
+                &maxFramesPerSlice, mfsSize
+            ), operation: "inputMaximumFramesRequest")
 
             // Register INPUT callback (push) — we will call AudioUnitRender inside it and write to ring buffer
             let selfPointer = Unmanaged.passUnretained(self).toOpaque()
@@ -858,6 +831,7 @@ public final class CoreAudioEngine: ObservableObject {
             } else {
                 recordSetupFailure("inputCallback", status: statusCB)
                 dlog("❌ INPUT: SetInputCallback failed — status=\(statusCB)", category: .engine)
+                return false
             }
         }
 
@@ -874,14 +848,14 @@ public final class CoreAudioEngine: ObservableObject {
             guard let comp = AudioComponentFindNext(nil, &desc) else {
                 recordSetupFailure("outputComponent")
                 dlog("❌ Failed to find HAL Output Audio Component (output)", category: .engine)
-                return
+                return false
             }
             var unit: AudioUnit?
             var status = AudioComponentInstanceNew(comp, &unit)
             guard status == noErr, let ou = unit else {
                 recordSetupFailure("outputUnitCreate", status: status)
                 dlog("❌ Failed to create OUTPUT unit: \(status)", category: .engine)
-                return
+                return false
             }
             outputUnit = ou
 
@@ -900,7 +874,7 @@ public final class CoreAudioEngine: ObservableObject {
             if status != noErr {
                 recordSetupFailure("outputEnable", status: status)
                 dlog("❌ Failed to enable OUTPUT on outputUnit: \(status)", category: .engine)
-                return
+                return false
             }
             status = AudioUnitSetProperty(
                 ou,
@@ -913,7 +887,7 @@ public final class CoreAudioEngine: ObservableObject {
             if status != noErr {
                 recordSetupFailure("outputDisableInput", status: status)
                 dlog("❌ Failed to disable INPUT on outputUnit: \(status)", category: .engine)
-                return
+                return false
             }
 
             // Attach to physical output device
@@ -929,79 +903,42 @@ public final class CoreAudioEngine: ObservableObject {
             if status != noErr {
                 recordSetupFailure("outputDevice", status: status)
                 dlog("❌ Failed to set OUTPUT device: \(status)", category: .engine)
-                return
+                return false
             }
 
             // Configure client stream format on OUTPUT unit's input (element 0)
             // Match device interleaving to avoid conversion issues
             var deviceFmt = AudioStreamBasicDescription()
             var deviceFmtSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-            if AudioUnitGetProperty(
-                ou,
-                kAudioUnitProperty_StreamFormat,
-                kAudioUnitScope_Output,
-                0,
-                &deviceFmt,
-                &deviceFmtSize
-            ) == noErr {
-                let deviceInterleaved = (deviceFmt.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
-                let ch = max(UInt32(1), min(UInt32(2), deviceFmt.mChannelsPerFrame))
-                var clientOutFormat = AudioStreamBasicDescription(
-                    mSampleRate: targetSampleRate,
-                    mFormatID: kAudioFormatLinearPCM,
-                    mFormatFlags: deviceInterleaved ? (kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked) :
-                        (kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved),
-                    mBytesPerPacket: deviceInterleaved ? (4 * ch) : 4,
-                    mFramesPerPacket: 1,
-                    mBytesPerFrame: deviceInterleaved ? (4 * ch) : 4,
-                    mChannelsPerFrame: ch,
-                    mBitsPerChannel: 32,
-                    mReserved: 0
-                )
-                _ = AudioUnitSetProperty(
-                    ou,
-                    kAudioUnitProperty_StreamFormat,
-                    kAudioUnitScope_Input,
-                    0,
-                    &clientOutFormat,
-                    asbdSize
-                )
-                var sr = self.currentSampleRate
-                _ = AudioUnitSetProperty(
-                    ou,
-                    kAudioUnitProperty_SampleRate,
-                    kAudioUnitScope_Input,
-                    0,
-                    &sr,
-                    UInt32(MemoryLayout<Double>.size)
-                )
-            } else {
-                _ = AudioUnitSetProperty(
-                    ou,
-                    kAudioUnitProperty_StreamFormat,
-                    kAudioUnitScope_Input,
-                    0,
-                    &clientFormat,
-                    asbdSize
-                )
-                var sr = self.currentSampleRate
-                _ = AudioUnitSetProperty(
-                    ou,
-                    kAudioUnitProperty_SampleRate,
-                    kAudioUnitScope_Input,
-                    0,
-                    &sr,
-                    UInt32(MemoryLayout<Double>.size)
-                )
-            }
-            _ = AudioUnitSetProperty(
-                ou,
-                kAudioUnitProperty_MaximumFramesPerSlice,
-                kAudioUnitScope_Global,
-                0,
-                &maxFramesPerSlice,
-                mfsSize
+            status = AudioUnitGetProperty(
+                ou, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &deviceFmt, &deviceFmtSize
             )
+            guard status == noErr, deviceFmt.mChannelsPerFrame >= 2 else {
+                recordSetupFailure("outputHardwareFormat", status: status)
+                return false
+            }
+            let deviceInterleaved = deviceFmt.mFormatFlags & kAudioFormatFlagIsNonInterleaved == 0
+            let ch: UInt32 = 2
+            var clientOutFormat = AudioStreamBasicDescription(
+                mSampleRate: targetSampleRate,
+                mFormatID: kAudioFormatLinearPCM,
+                mFormatFlags: deviceInterleaved ? (kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked) :
+                    (kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved),
+                mBytesPerPacket: deviceInterleaved ? 4 * ch : 4,
+                mFramesPerPacket: 1,
+                mBytesPerFrame: deviceInterleaved ? 4 * ch : 4,
+                mChannelsPerFrame: ch,
+                mBitsPerChannel: 32,
+                mReserved: 0
+            )
+            expectedOutputFormat = clientOutFormat
+            guard configureClientFormat(ou, scope: kAudioUnitScope_Input, element: 0, expected: &clientOutFormat) else {
+                return false
+            }
+            logControlStatus(AudioUnitSetProperty(
+                ou, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
+                &maxFramesPerSlice, mfsSize
+            ), operation: "outputMaximumFramesRequest")
 
             // Ensure output unit allocates its own render buffers (so ioData is non-nil)
             var shouldAllocate: UInt32 = 1
@@ -1014,7 +951,7 @@ public final class CoreAudioEngine: ObservableObject {
                 UInt32(MemoryLayout<UInt32>.size)
             )
             if status != noErr {
-                recordSetupFailure("outputBufferAllocation", status: status)
+                logControlStatus(status, operation: "outputBufferAllocationRequest")
                 dlog("⚠️ Failed to set ShouldAllocateBuffer on outputUnit: \(status)", category: .engine)
             }
 
@@ -1035,7 +972,7 @@ public final class CoreAudioEngine: ObservableObject {
             if status != noErr {
                 recordSetupFailure("outputRenderCallback", status: status)
                 dlog("❌ Failed to set render callback: \(status)", category: .engine)
-                return
+                return false
             }
         }
 
@@ -1045,7 +982,7 @@ public final class CoreAudioEngine: ObservableObject {
             if s != noErr {
                 recordSetupFailure("inputInitialize", status: s)
                 dlog("❌ Failed to initialize INPUT unit: \(s)", category: .engine)
-                return
+                return false
             }
         }
         if let ou = outputUnit {
@@ -1053,29 +990,22 @@ public final class CoreAudioEngine: ObservableObject {
             if s != noErr {
                 recordSetupFailure("outputInitialize", status: s)
                 dlog("❌ Failed to initialize OUTPUT unit: \(s)", category: .engine)
-                return
+                return false
             }
         }
 
-        // Diagnostic: Inspect output unit stream formats
-        if let ou = outputUnit {
-            var fmt = AudioStreamBasicDescription()
-            var sz = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-            if AudioUnitGetProperty(ou, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &fmt, &sz) == noErr {
-                let interleaved = (fmt.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
-                dlog(
-                    "📊 Output unit input format: \(fmt.mChannelsPerFrame)ch, \(fmt.mSampleRate)Hz, interleaved=\(interleaved)",
-                    category: .engine
-                )
-            }
-            if AudioUnitGetProperty(ou, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &fmt, &sz) ==
-                noErr {
-                let interleaved = (fmt.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
-                dlog(
-                    "📊 Output unit device format: \(fmt.mChannelsPerFrame)ch, \(fmt.mSampleRate)Hz, interleaved=\(interleaved)",
-                    category: .engine
-                )
-            }
+        guard verifyAttachedDevice(inputUnit, expected: inputDevice),
+              verifyAttachedDevice(outputUnit, expected: outputDevice),
+              let iu = inputUnit, let ou = outputUnit,
+              verifyClientFormat(iu, scope: kAudioUnitScope_Output, element: 1, expected: clientFormat),
+              verifyClientFormat(ou, scope: kAudioUnitScope_Input, element: 0, expected: expectedOutputFormat) else {
+            recordSetupFailure("initializedFormatReadback")
+            return false
+        }
+        guard let inputMaxFrames = readMaximumFramesPerSlice(inputUnit), inputMaxFrames > 0,
+              let outputMaxFrames = readMaximumFramesPerSlice(outputUnit), outputMaxFrames > 0 else {
+            recordSetupFailure("maximumFramesReadback")
+            return false
         }
 
         // 🔧 The MaximumFramesPerSlice writes above are best-effort: a unit may
@@ -1085,8 +1015,8 @@ public final class CoreAudioEngine: ObservableObject {
         let effectiveMaxFrames = max(
             maxFramesPerSlice,
             max(
-                readMaximumFramesPerSlice(inputUnit) ?? maxFramesPerSlice,
-                readMaximumFramesPerSlice(outputUnit) ?? maxFramesPerSlice
+                inputMaxFrames,
+                outputMaxFrames
             )
         )
         if effectiveMaxFrames != maxFramesPerSlice {
@@ -1106,8 +1036,10 @@ public final class CoreAudioEngine: ObservableObject {
               ringBuffer.isAllocated else {
             recordSetupFailure("bufferAllocation")
             dlog("❌ Failed to allocate audio buffers", level: .error, category: .engine)
-            return
+            return false
         }
+        configuredInputFormat = clientFormat
+        configuredOutputFormat = expectedOutputFormat
         isSetupComplete = true
         setupSucceeded = true
         DiagnosticEventStore.shared.record(
@@ -1122,6 +1054,73 @@ public final class CoreAudioEngine: ObservableObject {
         dlog("✅ Core Audio Units initialized successfully", category: .engine)
         dlog("🎤 Ready for real-time audio processing", category: .engine)
         dlog("🎛️ Biquad filter system ready (EQ not applied yet)", category: .engine)
+        return true
+    }
+
+    private func logControlStatus(_ status: OSStatus, operation: String) {
+        guard status != noErr else { return }
+        DiagnosticEventStore.shared.record("engine.coreAudio.failed", details: [
+            "operation": operation, "status": "\(status)"
+        ])
+        dlog("CoreAudio \(operation) failed: \(status)", level: .error, category: .engine)
+    }
+
+    private func readClientFormat(
+        _ unit: AudioUnit, scope: AudioUnitScope, element: AudioUnitElement
+    ) -> AudioStreamBasicDescription? {
+        var observed = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        let status = AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, scope, element, &observed, &size)
+        logControlStatus(status, operation: "streamFormatReadback")
+        return status == noErr ? observed : nil
+    }
+
+    private func verifyClientFormat(
+        _ unit: AudioUnit, scope: AudioUnitScope, element: AudioUnitElement,
+        expected: AudioStreamBasicDescription
+    ) -> Bool {
+        guard let observed = readClientFormat(unit, scope: scope, element: element),
+              AudioStreamFormatPolicy.matches(observed, expected: expected) else {
+            recordSetupFailure("streamFormatMismatch")
+            return false
+        }
+        return true
+    }
+
+    private func configureClientFormat(
+        _ unit: AudioUnit, scope: AudioUnitScope, element: AudioUnitElement,
+        expected: inout AudioStreamBasicDescription
+    ) -> Bool {
+        var requested = expected
+        let status = AudioStreamConfiguration.perform(expected: expected, write: {
+            AudioUnitSetProperty(
+                unit, kAudioUnitProperty_StreamFormat, scope, element,
+                &requested, UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            )
+        }, read: {
+            var observed = AudioStreamBasicDescription()
+            var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            let readStatus = AudioUnitGetProperty(
+                unit, kAudioUnitProperty_StreamFormat, scope, element, &observed, &size
+            )
+            return (readStatus, observed)
+        })
+        guard status == noErr else {
+            recordSetupFailure("streamFormatConfigureOrReadback", status: status)
+            return false
+        }
+        return true
+    }
+
+    private func verifyAttachedDevice(_ unit: AudioUnit?, expected: AudioDeviceID) -> Bool {
+        guard let unit else { return false }
+        var observed = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioUnitGetProperty(
+            unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &observed, &size
+        )
+        logControlStatus(status, operation: "attachedDeviceReadback")
+        return status == noErr && observed == expected
     }
 
     // MARK: - EQ Application
@@ -1261,6 +1260,8 @@ public final class CoreAudioEngine: ObservableObject {
             seq_atomic_int64_store_release(counter, 0)
         }
         callbackWindow?.reset()
+        inputHealth.reset()
+        outputHealth.reset()
         ringBuffer.reset()
         ringBuffer.primeSilence(frames: 1024)
         let s1 = AudioOutputUnitStart(ou)
@@ -1272,7 +1273,7 @@ public final class CoreAudioEngine: ObservableObject {
         let fillAfterOutputStart = ringBuffer.availableForReading
         let s2 = AudioOutputUnitStart(iu)
         guard s2 == noErr else {
-            AudioOutputUnitStop(ou)
+            logControlStatus(AudioOutputUnitStop(ou), operation: "rollbackOutputStart")
             DiagnosticEventStore.shared.record("engine.start.failed", details: ["inputStatus": "\(s2)"])
             dlog("❌ Failed to start Core Audio Engine input: \(s2)", level: .error, category: .engine)
             return false
@@ -1398,8 +1399,8 @@ public final class CoreAudioEngine: ObservableObject {
             dlog("🔕 Test tone auto-stopped (engine stopping)", category: .engine)
         }
 
-        if let iu = inputUnit { AudioOutputUnitStop(iu) }
-        if let ou = outputUnit { AudioOutputUnitStop(ou) }
+        if let iu = inputUnit { logControlStatus(AudioOutputUnitStop(iu), operation: "stopInput") }
+        if let ou = outputUnit { logControlStatus(AudioOutputUnitStop(ou), operation: "stopOutput") }
         isRunning = false
         if wasRunning {
             DiagnosticEventStore.shared.record("engine.stop")
@@ -1550,15 +1551,15 @@ public final class CoreAudioEngine: ObservableObject {
         isSetupComplete = false
 
         if let iu = inputUnit {
-            AudioOutputUnitStop(iu)
-            AudioUnitUninitialize(iu)
-            AudioComponentInstanceDispose(iu)
+            logControlStatus(AudioOutputUnitStop(iu), operation: "stopInput")
+            logControlStatus(AudioUnitUninitialize(iu), operation: "uninitializeInput")
+            logControlStatus(AudioComponentInstanceDispose(iu), operation: "disposeInput")
             inputUnit = nil
         }
         if let ou = outputUnit {
-            AudioOutputUnitStop(ou)
-            AudioUnitUninitialize(ou)
-            AudioComponentInstanceDispose(ou)
+            logControlStatus(AudioOutputUnitStop(ou), operation: "stopOutput")
+            logControlStatus(AudioUnitUninitialize(ou), operation: "uninitializeOutput")
+            logControlStatus(AudioComponentInstanceDispose(ou), operation: "disposeOutput")
             outputUnit = nil
         }
         if let abl = inputABL, let ablPtr = inputBufferList {
@@ -1586,6 +1587,37 @@ public final class CoreAudioEngine: ObservableObject {
         dlog("✅ CoreAudioEngine: Cleanup complete (including ring buffers)", category: .engine)
     }
 
+    /// Control-thread polling backs up device listeners and verifies the attached HAL devices and formats.
+    func validateRunningConfiguration() -> Bool {
+        guard let inputFormat = configuredInputFormat, let outputFormat = configuredOutputFormat,
+              let inputUnit, let outputUnit,
+              deviceIsAlive(inputDeviceID), deviceIsAlive(outputDeviceID),
+              let inputRate = getDeviceSampleRate(inputDeviceID),
+              let outputRate = getDeviceSampleRate(outputDeviceID),
+              inputRate.isFinite, outputRate.isFinite,
+              abs(inputRate - currentSampleRate) < 1, abs(outputRate - currentSampleRate) < 1,
+              verifyAttachedDevice(inputUnit, expected: inputDeviceID),
+              verifyAttachedDevice(outputUnit, expected: outputDeviceID),
+              verifyClientFormat(inputUnit, scope: kAudioUnitScope_Output, element: 1, expected: inputFormat),
+              verifyClientFormat(outputUnit, scope: kAudioUnitScope_Input, element: 0, expected: outputFormat) else {
+            recordSetupFailure("runningConfiguration")
+            return false
+        }
+        return true
+    }
+
+    private func deviceIsAlive(_ deviceID: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsAlive, mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var alive: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &alive)
+        logControlStatus(status, operation: "deviceIsAlive")
+        return status == noErr && alive != 0
+    }
+
     // MARK: - Buffer Management
 
     /// Reads back the frame limit a unit actually accepted, or nil if it cannot be queried.
@@ -1601,6 +1633,7 @@ public final class CoreAudioEngine: ObservableObject {
             &value,
             &size
         )
+        logControlStatus(status, operation: "readMaximumFramesPerSlice")
         guard status == noErr, value > 0 else { return nil }
         return value
     }
@@ -1968,7 +2001,7 @@ private final class AudioCallbackWindow: @unchecked Sendable {
 
 // MARK: - Render Callback
 
-private func renderCallbackFunction(
+func renderCallbackFunction(
     inRefCon: UnsafeMutableRawPointer,
     ioActionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
     inTimeStamp: UnsafePointer<AudioTimeStamp>,
@@ -1978,17 +2011,6 @@ private func renderCallbackFunction(
 ) -> OSStatus {
     // Get reference to CoreAudioEngine
     let engine = Unmanaged<CoreAudioEngine>.fromOpaque(inRefCon).takeUnretainedValue()
-
-    // One-shot real-time priority promotion for the output render thread.
-    if !engine.didPromoteOutputThread {
-        engine.didPromoteOutputThread = true
-        let period = Double(inNumberFrames) / engine.currentSampleRate
-        RealtimeThread.promoteCurrentThread(
-            periodSec: period,
-            computationSec: period * 0.5,
-            constraintSec: period * 0.85
-        )
-    }
 
     // Ensure ioData buffers have valid memory (fallback to preallocated buffers)
     if let ioData {
@@ -2004,6 +2026,7 @@ private func renderCallbackFunction(
     }
 
     // Diagnostics about output buffers and callback cadence
+    engine.outputHealth.noteInvocation()
     engine.renderFramesAccum &+= 1
     seq_atomic_int64_fetch_add(engine.diagnosticOutputCallbacks, 1)
     seq_atomic_int64_store_release(engine.diagnosticLastOutputCallback, Int64(bitPattern: mach_absolute_time()))
@@ -2012,17 +2035,47 @@ private func renderCallbackFunction(
     // Note: test tone now generated in input callback and passes through ring buffer
 
     // RING READ: consume audio frames from ring buffer and feed to output
-    guard let ioData else { return noErr }
+    if inNumberFrames == 0 {
+        engine.outputHealth.noteIdle()
+        return noErr
+    }
+    guard let ioData else {
+        engine.outputHealth.noteFailure(.missingOutput)
+        ioActionFlags.pointee.insert(.unitRenderAction_OutputIsSilence)
+        return noErr
+    }
     let outputBuffers = UnsafeMutableAudioBufferListPointer(ioData)
     let outBufferCount = outputBuffers.count
     let framesRequested = Int(inNumberFrames)
     let rb = engine.ringBuffer
     // 🔧 Fallback-буфери з outputABL мають ємність allocatedFrameCapacity — не писати більше
     guard inNumberFrames <= engine.allocatedFrameCapacity else {
+        engine.outputHealth.noteFailure(.oversizedBlock)
+        silenceInvalidOutput(ioData, flags: ioActionFlags)
         return kAudioUnitErr_TooManyFramesToProcess
     }
 
-    if outBufferCount == 1, outputBuffers[0].mNumberChannels >= 2 {
+    guard (outBufferCount == 1 && outputBuffers[0].mNumberChannels == 2) ||
+        (outBufferCount == 2 && outputBuffers[0].mNumberChannels == 1 && outputBuffers[1].mNumberChannels == 1),
+        outputBuffers.allSatisfy({
+            $0.mData != nil && Int($0.mDataByteSize) >= framesRequested * Int($0.mNumberChannels) * 4
+        }) else {
+        engine.outputHealth.noteFailure(.invalidOutputFormat)
+        silenceInvalidOutput(ioData, flags: ioActionFlags)
+        return noErr
+    }
+    // One-shot real-time priority promotion for the output render thread.
+    if !engine.didPromoteOutputThread {
+        engine.didPromoteOutputThread = true
+        let period = Double(inNumberFrames) / engine.currentSampleRate
+        RealtimeThread.promoteCurrentThread(
+            periodSec: period,
+            computationSec: period * 0.5,
+            constraintSec: period * 0.85
+        )
+    }
+
+    if outBufferCount == 1, outputBuffers[0].mNumberChannels == 2 {
         guard let outPtr = outputBuffers[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
         rb.readInterleavedResampled(
             outPtr: outPtr,
@@ -2060,6 +2113,7 @@ private func renderCallbackFunction(
             seq_atomic_int64_store_release(engine.diagnosticTestToneDeviceBufferSeen, 1)
         }
     }
+    engine.outputHealth.noteValidBlock()
     return noErr
 }
 
@@ -2085,6 +2139,7 @@ private func inputCaptureCallbackFunction(
     #endif
 
     let engine = Unmanaged<CoreAudioEngine>.fromOpaque(inRefCon).takeUnretainedValue()
+    engine.inputHealth.noteInvocation()
     engine.inputCallbackCounter &+= 1
     seq_atomic_int64_fetch_add(engine.diagnosticInputCallbacks, 1)
     seq_atomic_int64_store_release(engine.diagnosticLastInputCallback, Int64(bitPattern: mach_absolute_time()))
@@ -2104,12 +2159,20 @@ private func inputCaptureCallbackFunction(
 
     // Prepare scratch input ABL (deinterleaved)
     guard let iu = engine.inputUnit,
-          let inputBufferList = engine.inputBufferList else { return kAudioUnitErr_Uninitialized }
+          let inputBufferList = engine.inputBufferList else {
+        engine.inputHealth.noteFailure(.missingInput, status: kAudioUnitErr_Uninitialized)
+        return kAudioUnitErr_Uninitialized
+    }
     let bytesPerFrame: UInt32 = 4
     let frames = Int(inNumberFrames)
     let bufferSize = inNumberFrames * bytesPerFrame
     // 🔧 Пристрій, що порушує MaximumFramesPerSlice, не має писати за межі преалокованих буферів
-    guard inNumberFrames > 0, inNumberFrames <= engine.allocatedFrameCapacity else {
+    if inNumberFrames == 0 {
+        engine.inputHealth.noteIdle()
+        return noErr
+    }
+    guard inNumberFrames <= engine.allocatedFrameCapacity else {
+        engine.inputHealth.noteFailure(.oversizedBlock)
         return kAudioUnitErr_TooManyFramesToProcess
     }
     let inABL = UnsafeMutableAudioBufferListPointer(inputBufferList)
@@ -2144,6 +2207,7 @@ private func inputCaptureCallbackFunction(
         var ts = tsIn // safe to pass input timeline timestamp
         let status = AudioUnitRender(iu, ioActionFlags, &ts, 1, inNumberFrames, inputBufferList)
         if status != noErr {
+            engine.inputHealth.noteFailure(.renderFailed, status: status)
             return status
         }
     }
@@ -2168,5 +2232,17 @@ private func inputCaptureCallbackFunction(
         engine.countInputCallbacks &+= 1
     #endif
 
+    engine.inputHealth.noteValidBlock()
     return noErr
+}
+
+/// ⚡ Touch only the advertised writable memory; no allocation or control-thread work.
+@inline(__always)
+private func silenceInvalidOutput(
+    _ data: UnsafeMutablePointer<AudioBufferList>, flags: UnsafeMutablePointer<AudioUnitRenderActionFlags>
+) {
+    flags.pointee.insert(.unitRenderAction_OutputIsSilence)
+    for buffer in UnsafeMutableAudioBufferListPointer(data) {
+        if let memory = buffer.mData { memset(memory, 0, Int(buffer.mDataByteSize)) }
+    }
 }

@@ -52,6 +52,7 @@ enum RoutingRequestReason: String {
     case outputDisconnected
     case deviceRecovery
     case wake
+    case healthRecovery
 }
 
 enum OutputVolumeTransfer {
@@ -203,6 +204,18 @@ public final class AudioRouter: ObservableObject {
     private var expectedBlackHoleOutputVolume: OutputVolumeState?
     private var monitoredBlackHoleDeviceID: AudioDeviceID?
     private var processTapEngineStorage: AnyObject?
+    private var healthTimer: DispatchSourceTimer?
+    private var healthPolicies: [AudioRouteHealthPolicy] = []
+    private var recoveryBudget = AudioRecoveryBudget()
+    private var defaultOutputObservation = DefaultOutputObservation()
+    private var recoveryTask: Task<Void, Never>?
+    private var configurationChangeTask: Task<Void, Never>?
+    private var configurationListeners: [AudioPropertyListenerRegistration] = []
+    private var recoveryBackend: ActiveAudioRoutingBackend = .none
+    private var recoveryFallbackAttempted = false
+    private var recoveryProcessingEnabled = true
+    private var recoveryOutput: AudioDevice?
+    private var routingSessionRequested = false
 
     static let backendPreferenceKey = "audioRoutingBackend"
 
@@ -237,7 +250,7 @@ public final class AudioRouter: ObservableObject {
     /// restart that failed). Quitting in that window must still restore the real
     /// output, which `CoreAudioEngine.isRunning` alone would not catch.
     public var isRoutingOwned: Bool {
-        activeBackend != .none || activeInputUID != nil || CoreAudioEngine.shared.isRunning
+        routingSessionRequested || activeBackend != .none || activeInputUID != nil || CoreAudioEngine.shared.isRunning
     }
 
     public static let shared = AudioRouter()
@@ -335,7 +348,7 @@ public final class AudioRouter: ObservableObject {
             }
 
             self.updateStatus()
-            if !self.isRoutingOwned {
+            if !self.isRoutingOwned, !self.routingSessionRequested {
                 CoreAudioEngine.shared.restoreDeviceSampleRates()
             }
         }
@@ -554,28 +567,37 @@ public final class AudioRouter: ObservableObject {
             return
         }
 
-        dlog("Setting up BlackHole routing with CoreAudio...", category: .routing)
-
-        // Setup CoreAudioEngine with BlackHole input and physical output
-        CoreAudioEngine.shared.setup(
-            inputDevice: blackHoleInput.id,
-            outputDevice: physicalOutput.id
-        )
-
-        // Start CoreAudioEngine
-        guard CoreAudioEngine.shared.start() else {
+        guard activateBlackHoleRoute(output: physicalOutput) else {
             errorLog("Cannot start BlackHole routing", category: .routing)
-            restoreOriginalSystemOutputDevice()
             return
         }
+        selectedInputDevice = blackHoleInput
+        dlog("BlackHole routing configured to \(physicalOutput.name)", category: .routing)
+    }
 
-        // Ensure system output is BlackHole to avoid parallel unprocessed path to Scarlett
-        setAsDefaultOutputDevice(blackHoleInput)
-        dlog(
-            "BlackHole routing configured: System → BlackHole → CoreAudio → \(physicalOutput.name)",
-            level: .info,
-            category: .routing
-        )
+    /// Diagnostic entry points use the same verified setup, rollback and health monitoring as normal routing.
+    private func activateBlackHoleRoute(output: AudioDevice) -> Bool {
+        guard let previousOutput = currentSystemOutputDevice() else { return false }
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        wakeRestartTask?.cancel()
+        wakeRestartTask = nil
+        wasRoutingBeforeSleep = false
+        recoveryBudget = AudioRecoveryBudget()
+        recoveryFallbackAttempted = false
+        routingSessionRequested = true
+        let succeeded = AudioRouteActivation.perform(start: {
+            stopActiveBackendForRestart()
+            return startBlackHoleRouting(output: output, persistEnabledStateOnFailure: false)
+        }, rollback: {
+            rollbackFailedActivation(previousOutput: previousOutput)
+            routingSessionRequested = false
+        })
+        if succeeded {
+            selectedOutputDevice = output
+            preferredOutputUID = output.uid
+        }
+        return succeeded
     }
 
     private func findBestPhysicalOutputDevice() -> AudioDevice? {
@@ -685,28 +707,58 @@ public final class AudioRouter: ObservableObject {
             return true
         }
 
-        stopActiveBackendForRestart()
-
-        switch backendPreference {
-        case .native:
-            return startNativeRouting(
-                output: physicalOutput,
-                persistEnabledStateOnFailure: persistEnabledStateOnFailure
-            )
-        case .blackHole:
-            return startBlackHoleRouting(
-                output: physicalOutput,
-                persistEnabledStateOnFailure: persistEnabledStateOnFailure
-            )
-        case .automatic:
-            if startNativeRouting(output: physicalOutput, persistEnabledStateOnFailure: false) {
-                return true
+        if reason == .request || reason == .outputSelected || reason == .backendPreferenceChanged {
+            recoveryTask?.cancel()
+            recoveryTask = nil
+            recoveryBudget = AudioRecoveryBudget()
+            recoveryFallbackAttempted = false
+        }
+        let previousOutput = currentSystemOutputDevice()
+        guard previousOutput != nil else {
+            DiagnosticEventStore.shared.record("routing.enable.failed", details: ["reason": "defaultOutputRead"])
+            return false
+        }
+        routingSessionRequested = true
+        return AudioRouteActivation.perform(start: {
+            stopActiveBackendForRestart()
+            switch backendPreference {
+            case .native:
+                return startNativeRouting(
+                    output: physicalOutput,
+                    persistEnabledStateOnFailure: persistEnabledStateOnFailure
+                )
+            case .blackHole:
+                return startBlackHoleRouting(
+                    output: physicalOutput,
+                    persistEnabledStateOnFailure: persistEnabledStateOnFailure
+                )
+            case .automatic:
+                if startNativeRouting(output: physicalOutput, persistEnabledStateOnFailure: false) { return true }
+                DiagnosticEventStore.shared.record("routing.native.fallback", details: ["reason": "startFailed"])
+                return startBlackHoleRouting(
+                    output: physicalOutput,
+                    persistEnabledStateOnFailure: persistEnabledStateOnFailure
+                )
             }
-            DiagnosticEventStore.shared.record("routing.native.fallback", details: ["reason": "startFailed"])
-            return startBlackHoleRouting(
-                output: physicalOutput,
-                persistEnabledStateOnFailure: persistEnabledStateOnFailure
-            )
+        }, rollback: {
+            rollbackFailedActivation(previousOutput: previousOutput)
+            if reason != .healthRecovery {
+                routingSessionRequested = false
+            }
+            if persistEnabledStateOnFailure { UserDefaults.standard.set(false, forKey: "eqWasEnabled") }
+        })
+    }
+
+    private func rollbackFailedActivation(previousOutput: AudioDevice?) {
+        stopActiveBackendForRestart()
+        CoreAudioEngine.shared.restoreDeviceSampleRates()
+        if let previousOutput,
+           !previousOutput.name.lowercased().contains(AppConstants.DeviceNames.blackHoleLowercase),
+           let current = outputDevices.first(where: { $0.uid == previousOutput.uid }),
+           setAsDefaultOutputDevice(current) {
+            DiagnosticEventStore.shared.record("routing.activation.rolledBack", details: ["result": "originalOutput"])
+        } else {
+            restoreOriginalSystemOutputDevice()
         }
     }
 
@@ -720,10 +772,11 @@ public final class AudioRouter: ObservableObject {
         }
 
         let previousDefaultOutput = currentSystemOutputDevice()
-        setAsDefaultOutputDevice(output)
+        saveCurrentSystemOutputDevice()
+        guard setAsDefaultOutputDevice(output) else { return false }
         let nativeEngine = ProcessTapEngine()
         nativeEngine.onSampleRateChange = { [weak self] in
-            self?.enableEQRouting(forceRestart: true, reason: .sampleRateChanged)
+            self?.scheduleConfigurationRecovery(reason: .sampleRateChanged)
         }
         switch nativeEngine.start(outputDeviceID: output.id, prepareProcessing: { sampleRate, bufferFrames in
             CoreAudioEngine.shared.prepareProcessTap(
@@ -748,6 +801,8 @@ public final class AudioRouter: ObservableObject {
                     "sampleRateHz": String(format: "%.0f", info.sampleRate)
                 ]
             )
+            installConfigurationListeners(devices: [output.id], includeRate: false)
+            startHealthMonitoring()
             dlog("EQ routing active: native Process Tap → \(output.name)", level: .info, category: .routing)
             return true
         case let .failure(error):
@@ -789,8 +844,6 @@ public final class AudioRouter: ObservableObject {
             return false
         }
 
-        activeInputUID = blackHoleDevice.uid
-        activeOutputUID = physicalOutput.uid
         saveCurrentSystemOutputDevice()
 
         let virtualVolumeReady = BlackHoleGainStaging.prepareVirtualOutput(
@@ -813,20 +866,17 @@ public final class AudioRouter: ObservableObject {
             return false
         }
 
-        setAsDefaultOutputDevice(blackHoleDevice)
+        guard setAsDefaultOutputDevice(blackHoleDevice) else { return false }
         removeBlackHoleVolumeListeners()
         let engine = CoreAudioEngine.shared
         engine.stop()
-        engine.setup(
-            inputDevice: blackHoleDevice.id,
-            outputDevice: physicalOutput.id
-        )
-
+        guard engine.setup(inputDevice: blackHoleDevice.id, outputDevice: physicalOutput.id) else {
+            return false
+        }
+        AudioEngine.shared.reapplyCurrentFilters()
         guard engine.start() else {
             DiagnosticEventStore.shared.record("routing.enable.failed", details: ["reason": "engineStart"])
             errorLog("Core Audio Engine failed to start; restoring system output", category: .routing)
-            activeBackend = .blackHole
-            disableEQRouting(persistEnabledState: persistEnabledStateOnFailure)
             return false
         }
 
@@ -853,13 +903,15 @@ public final class AudioRouter: ObservableObject {
                 "routing.enable.failed",
                 details: ["backend": "blackHole", "reason": "physicalUnity"]
             )
-            activeBackend = .blackHole
-            disableEQRouting(persistEnabledState: persistEnabledStateOnFailure)
             return false
         }
 
         installBlackHoleVolumeListeners(deviceID: blackHoleDevice.id)
         activeBackend = .blackHole
+        activeInputUID = blackHoleDevice.uid
+        activeOutputUID = physicalOutput.uid
+        installConfigurationListeners(devices: [blackHoleDevice.id, physicalOutput.id], includeRate: true)
+        startHealthMonitoring()
 
         DiagnosticEventStore.shared.record(
             "routing.enable.succeeded",
@@ -876,6 +928,8 @@ public final class AudioRouter: ObservableObject {
 
     private func stopActiveBackendForRestart() {
         let previousBackend = activeBackend
+        stopHealthMonitoring()
+        removeConfigurationListeners()
         removeBlackHoleVolumeListeners()
         if #available(macOS 14.4, *), let nativeEngine = processTapEngineStorage as? ProcessTapEngine {
             nativeEngine.stop()
@@ -973,17 +1027,11 @@ public final class AudioRouter: ObservableObject {
                 return
             }
 
-            // Route system output to BlackHole and start CoreAudioEngine
-            setAsDefaultOutputDevice(blackHoleInput)
-            CoreAudioEngine.shared.setup(
-                inputDevice: blackHoleInput.id,
-                outputDevice: physicalOutput.id
-            )
-            guard CoreAudioEngine.shared.start() else {
+            guard activateBlackHoleRoute(output: physicalOutput) else {
                 errorLog("Cannot start test routing", category: .routing)
-                restoreOriginalSystemOutputDevice()
                 return
             }
+            selectedInputDevice = blackHoleInput
 
             dlog("🎛️ Test routing configured", category: .general)
             dlog("   Audio flows: System → BlackHole → CoreAudioEngine → \(physicalOutput.name)", category: .general)
@@ -1016,20 +1064,11 @@ public final class AudioRouter: ObservableObject {
                 return
             }
 
-            // Route system output to BlackHole, process to Built-in
-            setAsDefaultOutputDevice(blackHoleInput)
-            CoreAudioEngine.shared.setup(
-                inputDevice: blackHoleInput.id,
-                outputDevice: builtIn.id
-            )
-            guard CoreAudioEngine.shared.start() else {
+            guard activateBlackHoleRoute(output: builtIn) else {
                 errorLog("Cannot route to built-in output", category: .routing)
-                restoreOriginalSystemOutputDevice()
                 return
             }
-
-            selectedOutputDevice = builtIn
-            preferredOutputUID = builtIn.uid
+            selectedInputDevice = blackHoleInput
 
             dlog("🎛️ Diagnostic routing configured", category: .general)
             dlog("   Audio flows: System → BlackHole → CoreAudioEngine → \(builtIn.name)", category: .general)
@@ -1038,6 +1077,11 @@ public final class AudioRouter: ObservableObject {
     }
 
     func disableEQRouting(persistEnabledState: Bool = true) {
+        routingSessionRequested = false
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        stopHealthMonitoring()
+        removeConfigurationListeners()
         let previousBackend = activeBackend
         DiagnosticEventStore.shared.record(
             "routing.disable.request",
@@ -1076,91 +1120,48 @@ public final class AudioRouter: ObservableObject {
         // Stop CoreAudioEngine
         CoreAudioEngine.shared.stop()
 
+        CoreAudioEngine.shared.restoreDeviceSampleRates()
         if previousBackend == .blackHole {
-            CoreAudioEngine.shared.restoreDeviceSampleRates()
             restoreOriginalSystemOutputDevice()
         }
     }
 
-    func setAsDefaultOutputDevice(_ device: AudioDevice) {
+    @discardableResult
+    func setAsDefaultOutputDevice(_ device: AudioDevice) -> Bool {
         defaultOutputRequestGeneration &+= 1
-        let requestGeneration = defaultOutputRequestGeneration
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var deviceID = device.id
-        let dataSize = UInt32(MemoryLayout<AudioDeviceID>.size)
-
-        let status = AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            dataSize,
-            &deviceID
-        )
-
-        if status == noErr {
-            DiagnosticEventStore.shared.record(
-                "routing.defaultOutput.requested",
-                details: ["outputKind": diagnosticDeviceKind(device), "result": "success"]
+        defaultOutputObservation.willWrite(device.id)
+        let result = DefaultOutputSwitch.perform(requested: device.id, set: { requested in
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
             )
-            dlog("Set default output to: \(device.name)", category: .routing)
-
-            // Verify the change actually happened
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self,
-                      DefaultOutputVerificationPolicy.shouldVerify(
-                          requestGeneration: requestGeneration,
-                          currentGeneration: self.defaultOutputRequestGeneration
-                      ) else { return }
-                var checkAddress = AudioObjectPropertyAddress(
-                    mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-                    mScope: kAudioObjectPropertyScopeGlobal,
-                    mElement: kAudioObjectPropertyElementMain
-                )
-                var currentDeviceID: AudioDeviceID = 0
-                var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-
-                if AudioObjectGetPropertyData(
-                    AudioObjectID(kAudioObjectSystemObject),
-                    &checkAddress,
-                    0,
-                    nil,
-                    &size,
-                    &currentDeviceID
-                ) == noErr {
-                    if currentDeviceID != device.id {
-                        DiagnosticEventStore.shared.record(
-                            "routing.defaultOutput.verified",
-                            details: ["result": "mismatch"]
-                        )
-                        dlog(
-                            "System output did NOT switch to \(device.name) (got \(currentDeviceID), expected \(device.id))",
-                            level: .warning,
-                            category: .routing
-                        )
-                        self.showManualSetupAlert(targetDevice: device.name)
-                    } else {
-                        DiagnosticEventStore.shared.record(
-                            "routing.defaultOutput.verified",
-                            details: ["result": "success"]
-                        )
-                        dlog("Verified: System output is now \(device.name)", category: .routing)
-                    }
-                }
-            }
-        } else {
-            DiagnosticEventStore.shared.record(
-                "routing.defaultOutput.requested",
-                details: ["outputKind": diagnosticDeviceKind(device), "result": "failed", "status": "\(status)"]
+            var deviceID = requested
+            return AudioObjectSetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject), &address, 0, nil,
+                UInt32(MemoryLayout<AudioDeviceID>.size), &deviceID
             )
-            errorLog("Failed to set default output: \(status)", category: .routing)
-            self.showManualSetupAlert(targetDevice: device.name)
+        }, read: {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var observed = AudioDeviceID(kAudioObjectUnknown)
+            var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+            let status = AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &observed
+            )
+            return (status, observed)
+        })
+        DiagnosticEventStore.shared.record("routing.defaultOutput.verified", details: [
+            "result": result.success ? "success" : "failed",
+            "status": "\(result.status)", "outputKind": diagnosticDeviceKind(device)
+        ])
+        if !result.success {
+            dlog("Default output switch/readback failed: \(result.status)", level: .error, category: .routing)
         }
+        return result.success
     }
 
     // MARK: - System Output Device Management
@@ -1209,7 +1210,10 @@ public final class AudioRouter: ObservableObject {
             &deviceID
         )
 
-        guard status == noErr else { return nil }
+        guard status == noErr else {
+            DiagnosticEventStore.shared.record("routing.defaultOutput.readFailed", details: ["status": "\(status)"])
+            return nil
+        }
         return outputDevices.first(where: { $0.id == deviceID })
     }
 
@@ -1240,8 +1244,7 @@ public final class AudioRouter: ObservableObject {
         if let originalDevice = originalSystemOutputDevice,
            let currentDevice = outputDevices.first(where: { $0.uid == originalDevice.uid }) {
             dlog("Restoring original system output: \(currentDevice.name)", category: .routing)
-            restoreSystemOutput(to: currentDevice)
-            return
+            if restoreSystemOutput(to: currentDevice) { return }
         }
 
         // Fallback: recover by persisted UID (e.g. after a crash left no in-memory value).
@@ -1251,8 +1254,7 @@ public final class AudioRouter: ObservableObject {
                    !$0.name.lowercased().contains(AppConstants.DeviceNames.blackHoleLowercase)
            }) {
             dlog("Restoring original system output by UID: \(recovered.name)", category: .routing)
-            restoreSystemOutput(to: recovered)
-            return
+            if restoreSystemOutput(to: recovered) { return }
         }
 
         // Last resort: any non-BlackHole physical output so the user keeps hearing sound.
@@ -1272,11 +1274,12 @@ public final class AudioRouter: ObservableObject {
         }
     }
 
-    private func restoreSystemOutput(to device: AudioDevice) {
+    @discardableResult
+    private func restoreSystemOutput(to device: AudioDevice) -> Bool {
         if let blackHole = blackHoleOutputDevice() {
             transferOutputVolume(from: blackHole, to: device)
         }
-        setAsDefaultOutputDevice(device)
+        return setAsDefaultOutputDevice(device)
     }
 
     private func blackHoleOutputDevice() -> AudioDevice? {
@@ -1656,12 +1659,14 @@ public final class AudioRouter: ObservableObject {
             }
         }
 
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            DispatchQueue.main,
-            listenerBlock
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &propertyAddress, DispatchQueue.main, listenerBlock
         )
+        if status != noErr {
+            DiagnosticEventStore.shared.record("routing.listener.failed", details: [
+                "operation": "addDeviceList", "status": "\(status)"
+            ])
+        }
     }
 
     private func setupDefaultOutputChangeListener() {
@@ -1671,7 +1676,7 @@ public final class AudioRouter: ObservableObject {
             mElement: kAudioObjectPropertyElementMain
         )
 
-        AudioObjectAddPropertyListenerBlock(
+        let status = AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject),
             &propertyAddress,
             DispatchQueue.main
@@ -1688,27 +1693,34 @@ public final class AudioRouter: ObservableObject {
                 }
             }
         }
+        if status != noErr {
+            DiagnosticEventStore.shared.record("routing.listener.failed", details: [
+                "operation": "addDefaultOutput", "status": "\(status)"
+            ])
+        }
     }
 
     @MainActor
     private func handleDefaultOutputChange() {
-        guard isRoutingOwned,
-              let device = currentSystemOutputDevice(),
-              !device.name.lowercased().contains(AppConstants.DeviceNames.blackHoleLowercase) else { return }
-
-        if activeBackend == .native,
-           activeOutputUID == device.uid,
-           CoreAudioEngine.shared.currentOutputDeviceID == device.id {
-            return
-        }
-
-        wakeRestartTask?.cancel()
-        wakeRestartTask = nil
-        wasRoutingBeforeSleep = false
+        guard let device = currentSystemOutputDevice() else { return }
+        let action = defaultOutputObservation.action(
+            observed: device.id, sessionRequested: routingSessionRequested,
+            isVirtual: device.name.lowercased().contains(AppConstants.DeviceNames.blackHoleLowercase),
+            isCurrentNativeOutput: activeBackend == .native && activeOutputUID == device.uid &&
+                CoreAudioEngine.shared.currentOutputDeviceID == device.id,
+            sleepOrWakePending: wasRoutingBeforeSleep || wakeRestartTask != nil
+        )
+        guard action != .ignore else { return }
         originalSystemOutputDevice = device
         UserDefaults.standard.set(device.uid, forKey: originalOutputUIDKey)
         preferredOutputUID = device.uid
         selectedOutputDevice = device
+        // A genuine external selection supersedes a pending recovery. Own restore writes never reach here.
+        guard action == .rebuild else { return }
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        recoveryBudget = AudioRecoveryBudget()
+        recoveryFallbackAttempted = false
         dlog("System output changed to \(device.name) — rebuilding EQ routing", category: .routing)
         enableEQRouting(forceRestart: true, reason: .systemOutputChanged)
     }
@@ -1721,25 +1733,26 @@ public final class AudioRouter: ObservableObject {
     /// its devices in time, so a later arrival still gets picked up.
     @MainActor
     private func handleDeviceTopologyChange() {
+        guard recoveryTask == nil, wakeRestartTask == nil, !wasRoutingBeforeSleep else { return }
         if activeBackend == .native {
             guard let outputUID = activeOutputUID else { return }
             if let wantedUID = preferredOutputUID,
                wantedUID != outputUID,
                outputDevices.contains(where: { $0.uid == wantedUID }) {
-                enableEQRouting(forceRestart: true, reason: .preferredOutputReturned)
+                requestAutomaticRecovery(reason: .preferredOutputReturned)
                 return
             }
             guard let output = outputDevices.first(where: { $0.uid == outputUID }) else {
                 activeOutputUID = nil
                 guard findBestPhysicalOutputDevice() != nil else {
-                    disableEQRouting()
+                    requestAutomaticRecovery(reason: .outputDisconnected)
                     return
                 }
-                enableEQRouting(forceRestart: true, reason: .outputDisconnected)
+                requestAutomaticRecovery(reason: .outputDisconnected)
                 return
             }
             if !CoreAudioEngine.shared.isRunning || CoreAudioEngine.shared.currentOutputDeviceID != output.id {
-                enableEQRouting(forceRestart: true, reason: .deviceRecovery)
+                requestAutomaticRecovery(reason: .deviceRecovery)
             }
             return
         }
@@ -1755,8 +1768,8 @@ public final class AudioRouter: ObservableObject {
 
         // BlackHole gone (driver uninstalled or reset) — nothing left to capture.
         guard let input = inputDevices.first(where: { $0.uid == inputUID }) else {
-            dlog("BlackHole disappeared while routing — disabling EQ", level: .warning, category: .routing)
-            disableEQRouting()
+            dlog("BlackHole disappeared while routing — scheduling recovery", level: .warning, category: .routing)
+            requestAutomaticRecovery(reason: .deviceRecovery)
             return
         }
 
@@ -1766,7 +1779,7 @@ public final class AudioRouter: ObservableObject {
            wantedUID != outputUID,
            outputDevices.contains(where: { $0.uid == wantedUID }) {
             dlog("Preferred output reappeared — switching back", level: .info, category: .routing)
-            enableEQRouting(forceRestart: true, reason: .preferredOutputReturned)
+            requestAutomaticRecovery(reason: .preferredOutputReturned)
             return
         }
 
@@ -1780,7 +1793,7 @@ public final class AudioRouter: ObservableObject {
                     level: .warning,
                     category: .routing
                 )
-                disableEQRouting()
+                requestAutomaticRecovery(reason: .outputDisconnected)
                 return
             }
             dlog(
@@ -1788,7 +1801,7 @@ public final class AudioRouter: ObservableObject {
                 level: .warning,
                 category: .routing
             )
-            enableEQRouting(forceRestart: true, reason: .outputDisconnected)
+            requestAutomaticRecovery(reason: .outputDisconnected)
             return
         }
 
@@ -1800,7 +1813,7 @@ public final class AudioRouter: ObservableObject {
                 level: .warning,
                 category: .routing
             )
-            enableEQRouting(forceRestart: true, reason: .deviceRecovery)
+            requestAutomaticRecovery(reason: .deviceRecovery)
         }
     }
 
@@ -1829,9 +1842,13 @@ public final class AudioRouter: ObservableObject {
         // it and treat this as "was routing" too, or the intent to resume gets
         // silently dropped and wake never restores audio.
         let hadPendingWakeRestart = wakeRestartTask != nil
-        guard CoreAudioEngine.shared.isRunning || hadPendingWakeRestart else { return }
+        guard routingSessionRequested || CoreAudioEngine.shared.isRunning || hadPendingWakeRestart else { return }
 
         DiagnosticEventStore.shared.record("routing.sleep")
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        stopHealthMonitoring()
+        removeConfigurationListeners()
 
         wakeRestartTask?.cancel()
         wakeRestartTask = nil
@@ -1861,8 +1878,184 @@ public final class AudioRouter: ObservableObject {
             await self.refreshDevices()
             guard !Task.isCancelled else { return }
             dlog("Wake — restoring EQ routing", level: .info, category: .routing)
-            self.enableEQRouting(forceRestart: true, reason: .wake)
+            self.wakeRestartTask = nil
+            self.requestAutomaticRecovery(reason: .wake)
         }
+    }
+
+    // MARK: - Bounded automatic recovery (control thread only)
+
+    private func callbackSnapshots() -> [AudioCallbackHealthSnapshot] {
+        if #available(macOS 14.4, *), let tap = processTapEngineStorage as? ProcessTapEngine {
+            return [tap.callbackHealth.snapshot()]
+        }
+        return [CoreAudioEngine.shared.inputHealth.snapshot(), CoreAudioEngine.shared.outputHealth.snapshot()]
+    }
+
+    private func startHealthMonitoring() {
+        stopHealthMonitoring()
+        let now = ProcessInfo.processInfo.systemUptime
+        healthPolicies = callbackSnapshots().map { AudioRouteHealthPolicy(now: now, snapshot: $0) }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
+        timer.setEventHandler { [weak self] in self?.checkRouteHealth() }
+        healthTimer = timer
+        timer.resume()
+    }
+
+    private func stopHealthMonitoring() {
+        healthTimer?.cancel()
+        healthTimer = nil
+        healthPolicies = []
+    }
+
+    private func checkRouteHealth() {
+        guard routingSessionRequested, recoveryTask == nil, !wasRoutingBeforeSleep,
+              wakeRestartTask == nil, activeBackend != .none else { return }
+        let configurationValid: Bool = if #available(macOS 14.4, *),
+                                          let tap = processTapEngineStorage as? ProcessTapEngine {
+            tap.validateRunningConfiguration()
+        } else {
+            CoreAudioEngine.shared.validateRunningConfiguration()
+        }
+        guard configurationValid else {
+            DiagnosticEventStore.shared.record("routing.health.failed", details: ["reason": "configurationChanged"])
+            requestAutomaticRecovery(reason: .deviceRecovery)
+            return
+        }
+        let snapshots = callbackSnapshots()
+        let now = ProcessInfo.processInfo.systemUptime
+        guard snapshots.count == healthPolicies.count else { return }
+        for index in snapshots.indices {
+            if let failure = healthPolicies[index].evaluate(snapshots[index], now: now) {
+                DiagnosticEventStore.shared.record("routing.health.failed", details: [
+                    "reason": failure.rawValue, "path": "\(index)",
+                    "fault": "\(snapshots[index].lastFault)", "status": "\(snapshots[index].lastStatus)",
+                    "callbacks": "\(snapshots[index].callbacks)", "validBlocks": "\(snapshots[index].validBlocks)"
+                ])
+                requestAutomaticRecovery(reason: .healthRecovery)
+                return
+            }
+        }
+        if !CoreAudioEngine.shared.isRunning {
+            requestAutomaticRecovery(reason: .healthRecovery)
+            return
+        }
+        if snapshots.allSatisfy({ $0.validBlocks > 0 }) {
+            recoveryBudget.noteHealthy(now: now)
+            if recoveryBudget.attempts == 0 { recoveryFallbackAttempted = false }
+        }
+    }
+
+    private func requestAutomaticRecovery(reason: RoutingRequestReason) {
+        guard routingSessionRequested, recoveryTask == nil, !wasRoutingBeforeSleep else { return }
+        if recoveryBudget.attempts == 0 {
+            recoveryBackend = activeBackend
+            recoveryProcessingEnabled = CoreAudioEngine.shared.isEnabled
+            recoveryOutput = currentSystemOutputDevice()
+        }
+        stopActiveBackendForRestart()
+        guard let delay = recoveryBudget.nextDelay() else {
+            // One optional fallback, never an endless Native/BlackHole oscillation.
+            if recoveryBackend == .native, backendPreference == .automatic,
+               blackHoleDetected, !recoveryFallbackAttempted, let output = preferredOutputDevice() {
+                recoveryFallbackAttempted = true
+                let restored = AudioRouteActivation.perform(start: {
+                    startBlackHoleRouting(output: output, persistEnabledStateOnFailure: false)
+                }, rollback: {
+                    rollbackFailedActivation(previousOutput: recoveryOutput)
+                })
+                if restored {
+                    CoreAudioEngine.shared.setEnabled(recoveryProcessingEnabled)
+                    DiagnosticEventStore.shared.record("routing.recovery.fallback", details: ["backend": "blackHole"])
+                    return
+                }
+            }
+            DiagnosticEventStore.shared.record("routing.recovery.exhausted", details: [
+                "attempts": "\(recoveryBudget.attempts)", "trigger": reason.rawValue
+            ])
+            disableEQRouting()
+            restoreOriginalSystemOutputDevice()
+            return
+        }
+        DiagnosticEventStore.shared.record("routing.recovery.scheduled", details: [
+            "attempt": "\(recoveryBudget.attempts)", "delaySeconds": "\(delay)", "trigger": reason.rawValue
+        ])
+        recoveryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.routingSessionRequested else { return }
+            await self.refreshDevices()
+            guard !Task.isCancelled, self.routingSessionRequested else { return }
+            self.recoveryTask = nil
+            let succeeded = self.enableEQRouting(
+                forceRestart: true, persistEnabledStateOnFailure: false, reason: .healthRecovery
+            )
+            if succeeded {
+                CoreAudioEngine.shared.setEnabled(self.recoveryProcessingEnabled)
+                DiagnosticEventStore.shared.record("routing.recovery.restarted", details: [
+                    "attempt": "\(self.recoveryBudget.attempts)", "trigger": reason.rawValue
+                ])
+            } else {
+                self.requestAutomaticRecovery(reason: reason)
+            }
+        }
+    }
+
+    private func scheduleConfigurationRecovery(reason: RoutingRequestReason) {
+        guard routingSessionRequested else { return }
+        configurationChangeTask?.cancel()
+        configurationChangeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.configurationChangeTask = nil
+            self.requestAutomaticRecovery(reason: reason)
+        }
+    }
+
+    private func installConfigurationListeners(devices: [AudioDeviceID], includeRate: Bool) {
+        removeConfigurationListeners()
+        var selectors: [AudioObjectPropertySelector] = [
+            kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyBufferFrameSize
+        ]
+        if includeRate { selectors.append(kAudioDevicePropertyNominalSampleRate) }
+        for deviceID in devices {
+            for selector in selectors {
+                var address = AudioObjectPropertyAddress(
+                    mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
+                    mElement: kAudioObjectPropertyElementMain
+                )
+                let reason: RoutingRequestReason = selector == kAudioDevicePropertyNominalSampleRate
+                    ? .sampleRateChanged : .deviceRecovery
+                let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                    self?.scheduleConfigurationRecovery(reason: reason)
+                }
+                let status = AudioObjectAddPropertyListenerBlock(deviceID, &address, .main, block)
+                if status == noErr {
+                    configurationListeners.append(AudioPropertyListenerRegistration(
+                        deviceID: deviceID, address: address, block: block
+                    ))
+                } else {
+                    DiagnosticEventStore.shared.record("routing.listener.failed", details: [
+                        "operation": "addConfiguration", "selector": "\(selector)", "status": "\(status)"
+                    ])
+                }
+            }
+        }
+    }
+
+    private func removeConfigurationListeners() {
+        configurationChangeTask?.cancel()
+        configurationChangeTask = nil
+        for listener in configurationListeners {
+            var address = listener.address
+            let status = AudioObjectRemovePropertyListenerBlock(listener.deviceID, &address, .main, listener.block)
+            if status != noErr {
+                DiagnosticEventStore.shared.record("routing.listener.failed", details: [
+                    "operation": "removeConfiguration", "status": "\(status)"
+                ])
+            }
+        }
+        configurationListeners = []
     }
 
     // MARK: - Manual Setup Alert
